@@ -1,0 +1,9 @@
+free_thresh: 0.196
+image: parking_map.png
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -18.257816314697266
+- -48.45502471923828
+- 0.0
+resolution: 0.05

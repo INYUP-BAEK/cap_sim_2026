@@ -1,0 +1,310 @@
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"] 
+    controller_plugins: ["FollowPath"]
+
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 60                 
+      model_dt: 0.05                 
+      batch_size: 2000               
+      
+      vx_std: 0.2                    
+      vy_std: 0.0                    
+      wz_std: 0.6                    
+      
+      vx_max: 0.35                   
+      vx_min: 0.0
+      vy_max: 0.0
+      vy_min: 0.0
+      wz_max: 1.0                    
+      wz_min: -1.0
+      
+      iteration_count: 1
+      prune_distance: 1.7            
+      transform_tolerance: 0.2
+      temperature: 0.3               
+      gamma: 0.015
+      motion_model: "DiffDrive"      
+      visualize: true                
+      
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+        
+      AckermannConstraints:
+        min_turning_r: 0.0
+
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+      
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+        
+      ObstaclesCritic:
+        enabled: true
+        cost_power: 1
+        repulsion_weight: 5.0          
+        critical_weight: 20.0
+        consider_footprint: true       
+        collision_cost: 10000.0        
+        collision_margin_distance: 0.25 
+        near_goal_distance: 0.5
+        
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0               
+        max_heuristic_delay: 0.1
+        trajectory_point_step: 4
+        
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0               
+        offset_from_furthest: 20
+        threshold_to_consider: 1.4
+        
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_prefer: 0.785
+
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.2   
+      yaw_goal_tolerance: 0.5  
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.5
+      downsample_costmap: false
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      use_boundary_cost: true
+
+local_costmap:
+  local_costmap: 
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      transform_tolerance: 1.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      use_sim_time: false
+      rolling_window: true
+      width: 8  
+      height: 8
+      resolution: 0.05
+      
+      # 🚀 Footprint 오류 해결 파트
+      footprint: '[[-0.35, -0.215], [0.15, -0.215], [0.15, 0.215], [-0.35, 0.215]]'
+      footprint_padding: 0.02
+      robot_radius: 0.35
+      
+      plugins: ["stvl_lidar_layer", "stvl_camera_layer", "inflation_layer"]
+      
+      stvl_lidar_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        max_decay_time: 8.0      
+        min_decay_time: 0.5
+        decay_rate: 1.0
+        voxel_size: 0.1
+        track_unknown_space: true
+        max_obstacle_height: 2.5
+        origin_z: 0.0
+        publish_voxel_map: true   
+        combination_method: 1
+        observation_sources: "lidar"
+         
+        lidar:
+          sensor_frame: base_footprint
+          data_type: PointCloud2
+          topic: /cloud_registered_body 
+          marking: true
+          clearing: true
+          obstacle_range: 8.0
+          min_obstacle_height: 0.5
+          max_obstacle_height: 1.0
+          clear_after_reading: false
+
+      stvl_camera_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        max_decay_time: 1.0       
+        min_decay_time: 0.1       
+        decay_rate: 1.0
+        voxel_size: 0.1
+        track_unknown_space: true
+        max_obstacle_height: 1.5
+        origin_z: 0.0
+        publish_voxel_map: false  
+        combination_method: 1
+        observation_sources: "camera"
+          
+        camera:
+          sensor_frame: base_link
+          data_type: PointCloud2
+          topic: /camera/depth/voxel_cloud
+          marking: true
+          clearing: true
+          obstacle_range: 2.5            
+          min_obstacle_height: -1.5      
+          max_obstacle_height: 1.5       
+          v_fov: 1.01                    
+          h_fov: 1.52                    
+          clear_after_reading: true
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 3.0
+      publish_frequency: 1.0
+      transform_tolerance: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      use_sim_time: false
+      resolution: 0.05
+      track_unknown_space: true
+      
+      # 🚀 Footprint 오류 해결 파트
+      footprint: '[[-0.35, -0.215], [0.15, -0.215], [0.15, 0.215], [-0.35, 0.215]]'
+      footprint_padding: 0.02
+      robot_radius: 0.35
+      
+      plugins: ["static_layer", "stvl_lidar_layer", "stvl_camera_layer", "inflation_layer"]
+      
+      stvl_lidar_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        max_decay_time: 10.0
+        min_decay_time: 1.0
+        decay_rate: 0.8
+        voxel_size: 0.15
+        track_unknown_space: true
+        max_obstacle_height: 2.5
+        origin_z: 0.0
+        publish_voxel_map: false
+        combination_method: 1
+        observation_sources: "lidar"
+        
+        lidar:
+          sensor_frame: base_footprint
+          data_type: PointCloud2
+          topic: /cloud_registered_body
+          marking: true
+          clearing: true
+          obstacle_range: 15.0    
+          min_obstacle_height: 0.1
+          max_obstacle_height: 1.5
+          clear_after_reading: false  
+          
+      stvl_camera_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        max_decay_time: 2.0       
+        min_decay_time: 0.1       
+        decay_rate: 1.0
+        voxel_size: 0.15
+        track_unknown_space: true
+        max_obstacle_height: 1.5
+        origin_z: 0.0
+        publish_voxel_map: false  
+        combination_method: 1
+        observation_sources: "camera"
+          
+        camera:
+          sensor_frame: base_link
+          data_type: PointCloud2
+          topic: /camera/depth/voxel_cloud
+          marking: true
+          clearing: true
+          obstacle_range: 3.0            
+          min_obstacle_height: 0.05
+          max_obstacle_height: 1.5
+          v_fov: 1.01
+          h_fov: 1.52
+          clear_after_reading: true
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /Odometry
+    default_nav_to_pose_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: odom
+    robot_base_frame: base_footprint
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    odom_topic: /Odometry  
+    max_velocity: [0.35, 0.0, 1.0]
+    min_velocity: [-0.1, 0.0, -1.0] 
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
