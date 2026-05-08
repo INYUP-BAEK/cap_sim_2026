@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Polygon, Point32
 from std_msgs.msg import Bool, Int32
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -22,16 +22,20 @@ class AutoNavCommander(Node):
         self.ackermann_bt_path = os.path.join(pkg_dir, 'bt_xml', 'ackermann_nav_tree.xml')
 
         # 3. 로봇의 현재 상태 관리 변수 (초기값: 합체 상태라고 가정)
-        self.is_attached = True 
+        self.is_attached = True
+        self.cart_count = 0    
+
+
+        self.global_footprint_pub = self.create_publisher(Polygon, '/global_costmap/footprint', 10)
+        self.local_footprint_pub = self.create_publisher(Polygon, '/local_costmap/footprint', 10)
+
         
         # ==========================================================
         # 📡 4. 구독(Subscriber) 설정
         # ==========================================================
         # MuJoCo 브릿지와 동일한 분리/합체 트리거 토픽을 구독하여 스스로 상태를 업데이트합니다.
-        self.detach_sub = self.create_subscription(Bool, '/detach_trigger', self.detach_callback, 10)
-        self.joy_tri_btn_sub = self.create_subscription(Bool, '/joy_tri_btn_msg', self.joy_tri_btn_callback, 10)
-        self.cart_docking_sub = self.create_subscription(Int32, '/robot_attach_topic', self.cart_docking_callback, 10)
-        
+        self.docking_sub = self.create_subscription(Bool, '/docking_state', self.docking_callback, 10)
+
         # 목적지를 받을 커스텀 토픽 (터미널이나 상위 노드에서 여기로 목적지를 쏩니다)
         self.goal_sub = self.create_subscription(PoseStamped, '/mission_goal', self.mission_goal_callback, 10)
 
@@ -40,22 +44,34 @@ class AutoNavCommander(Node):
     # ----------------------------------------------------------
     # 🔄 상태 업데이트 콜백 함수들
     # ----------------------------------------------------------
-    def detach_callback(self, msg):
+    def docking_callback(self, msg):
         # msg.data가 True면 분리(디퍼런셜), False면 합체(아커만)
-        self.is_attached = not msg.data  
-        mode_str = "디퍼런셜(분리)" if msg.data else "아커만(합체)"
+        self.is_attached = msg.data
+        self.update_nav2_footprint()
+        if self.is_attached :
+            mode_str = "아커만(합체)"
+        else:
+            mode_str = "디퍼런셜(분리)"
         self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
 
-    def joy_tri_btn_callback(self, msg):
-        # msg.data가 True면 분리(디퍼런셜), False면 합체(아커만)
-        self.is_attached = True
-        mode_str = "디퍼런셜(분리)" if msg.data else "아커만(cart합체)"
-        self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
+    def update_nav2_footprint(self):
+        msg = Polygon()
+        rear_bumper_x, width = -0.3, 0.25
 
-    def cart_docking_callback(self, msg):
-        # 카트 도킹 신호가 오면 무조건 아커만 모드로 변경 (시나리오에 맞게 수정 가능)
-        # self.is_attached = True
-        self.get_logger().info("🔄 [상태 변경 감지] 카트 도킹 확인! 현재 모드: 아커만(합체)")
+        if self.is_attached:
+            current_wheelbase = 0.48 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+            front_bumper_x = current_wheelbase + 0.3
+        else:
+            front_bumper_x = 0.3
+
+        msg.points = [
+            Point32(x=front_bumper_x, y=-width, z=0.0), 
+            Point32(x=front_bumper_x, y=width,  z=0.0), 
+            Point32(x=rear_bumper_x,  y=width,  z=0.0), 
+            Point32(x=rear_bumper_x,  y=-width, z=0.0)  
+        ]
+        self.global_footprint_pub.publish(msg)
+        self.local_footprint_pub.publish(msg)
 
     # ----------------------------------------------------------
     # 🎯 목적지 수신 및 Nav2 자동 실행 콜백 함수
@@ -93,6 +109,9 @@ class AutoNavCommander(Node):
 
     def get_result_callback(self, future):
         self.get_logger().info("✅ 목적지에 무사히 도착했습니다!")
+
+
+
 
 def main(args=None):
     rclpy.init(args=args)

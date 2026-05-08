@@ -1,0 +1,27 @@
+/front/ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    two_d_mode: true
+    publish_tf: true
+    
+    # 🚨 프레임 설정 (완벽함 - 수정 불필요)
+    map_frame: map                  
+    odom_frame: front/odom
+    base_link_frame: front/base_footprint
+    world_frame: front/odom         
+
+    # 1. 휠 오도메트리 입력
+    odom0: /front/odom_wheel        
+    odom0_config: [true,  true,  false,  # x, y (위치)
+                   false, false, false,  # 🚨 롤, 피치, 요 (IMU를 믿기 위해 전부 false)
+                   true,  true,  false,  # vx, vy (선속도)
+                   false, false, false,  # 🚨 회전 속도도 IMU에 양보 (전부 false)
+                   false, false, false]  # ax, ay, az
+
+    # 2. IMU 입력
+    imu0: /front/imu 
+    imu0_config: [false, false, false,
+                  false, false, false,   # 🚨 6축 IMU 기준 절대 각도(yaw)는 false 권장 (지자기 센서가 있는 9축이면 true)
+                  false, false, false,
+                  false, false, true,    # vyaw (각속도 - 회전의 핵심)
+                  true,  false, false]   # ax (선가속도 - 노이즈가 심하면 false로 꺼도 무방함)
