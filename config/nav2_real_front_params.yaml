@@ -2,7 +2,6 @@ front:
   amcl:
     ros__parameters:
       use_sim_time: false
-      # 🚨 [수정] 실제 환경 TF 지연 대비 (0.5 -> 1.0)
       transform_tolerance: 1.0
       alpha1: 0.2
       alpha2: 0.2
@@ -13,23 +12,20 @@ front:
       global_frame_id: "map"
       odom_frame_id: "front/odom"
       scan_topic: "scan"
-      # 🚨 [유지] 멀티봇 환경에서 공유 맵을 구독하기 위해 절대 경로 설정
       map_topic: "/map"
       max_particles: 2000
       min_particles: 500
       set_initial_pose: true
       initial_pose: {x: 4.1, y: -2.9, z: 0.0, yaw: 0.0}
 
-      # 🚨 [추가/튜닝] AMCL 업데이트 주기 단축 (조금만 움직여도 즉각 위치 보정)
       update_min_d: 0.1
       update_min_a: 0.1
 
-      # 🚨 [추가/튜닝] 라이다 센서 스펙 및 벽 매칭 신뢰도 극대화
       laser_model_type: "likelihood_field"
-      laser_max_range: 8.0           # 사용하는 2D 라이다의 최대 인식 거리에 맞춰 수정하세요.
+      laser_max_range: 8.0 
       laser_likelihood_max_dist: 2.0 
-      z_hit: 0.9                     # 맵의 벽과 라이다가 맞았을 때의 확신도 상승 (기본 0.5 -> 0.9)
-      z_rand: 0.1                    # 노이즈 처리 확률 하향
+      z_hit: 0.9 
+      z_rand: 0.1  
 
   controller_server:
     ros__parameters:  
@@ -51,7 +47,6 @@ front:
         max_lookahead_dist: 0.9
         lookahead_time: 1.5
         rotate_to_heading_angular_vel: 1.0
-        # 🚨 [수정] 컨트롤러 내부의 TF 지연 허용치도 올려줌 (0.5 -> 1.0)
         transform_tolerance: 1.0
         use_velocity_scaled_lookahead_dist: false
         min_approach_linear_velocity: 0.05
@@ -96,7 +91,6 @@ front:
         width: 4
         height: 4
         resolution: 0.05
-        # 🚨 [수정] 코스트맵 TF 지연 대비 (0.5 -> 1.0)
         transform_tolerance: 1.0
         footprint: "[[-0.3, -0.3], [0.3, -0.3], [0.3, 0.3], [-0.3, 0.3]]"
         plugins: ["obstacle_layer", "inflation_layer"]
@@ -106,10 +100,8 @@ front:
           max_obstacle_height: 2.0 
           observation_sources: scan
           scan:
-            # 🚨 1. 맨 앞에 슬래시(/)를 붙여서 절대 경로로 강제 지정!
             topic: "/front/scan" 
             
-            # 🚨 2. 아까 터미널에서 확인한 frame_id를 그대로 적어줍니다.
             sensor_frame: "front/laser_link" 
             
             data_type: "LaserScan"
@@ -120,7 +112,6 @@ front:
             clearing: True
             marking: True
             
-            # 🚨 3. 무한대(빈 공간) 값 처리 허용
             inf_is_valid: True
         inflation_layer:
           plugin: "nav2_costmap_2d::InflationLayer"
@@ -137,7 +128,6 @@ front:
         robot_base_frame: "front/base_footprint"
         resolution: 0.05
         track_unknown_space: true
-        # 🚨 [수정] 코스트맵 TF 지연 대비 (0.5 -> 1.0)
         transform_tolerance: 1.0
         plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
         obstacle_layer:
@@ -157,7 +147,6 @@ front:
         static_layer:
           plugin: "nav2_costmap_2d::StaticLayer"
           map_subscribe_transient_local: True
-          # 🚨 [유지] 공유 맵을 사용하므로 절대 경로
           map_topic: "/map"
         inflation_layer:
           plugin: "nav2_costmap_2d::InflationLayer"
@@ -167,8 +156,7 @@ front:
   map_server:
     ros__parameters:
       use_sim_time: false
-      # 🚨 [유지] inyup PC 경로 적용
-      yaml_filename: "/home/inyup/colcon_ws/src/cap_sim_2026/maps/parking_map_2d.yaml" #320
+      yaml_filename: "/home/baek/colcon_ws/src/cap_sim_2026/maps/parking_map_2d.yaml" #320
       frame_id: "map"
 
   bt_navigator:
@@ -177,8 +165,6 @@ front:
       global_frame: "map"
       robot_base_frame: "front/base_footprint"
       odom_topic: "odom"
-      # 🚨 [추가/튜닝] 시나리오 기반의 다층 구조(Multi-layered) 커스텀 BT 파일 연결
-      # (실제 구체화된 여러 층의 BT XML 파일 경로로 맞춰서 수정하세요)
       default_nav_to_pose_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
 
   behavior_server:

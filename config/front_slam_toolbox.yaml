@@ -5,7 +5,7 @@ front/slam_toolbox:
     mode: localization
     
     # 🚨 리어봇이 쓰던 맵 경로 그대로 사용 (확장자 .yaml 제외)
-    map_file_name: /home/inyup/colcon_ws/src/cap_sim_2026/maps/hex_robot_map
+    map_file_name: /home/baek/colcon_ws/src/cap_sim_2026/maps/hex_robot_map
     map_start_pose: [0.5, 0.0, 0.0]  # 리어봇(0,0)보다 2.5m 앞쪽에서 시작한다고 가정
     map_start_at_dock: false
 

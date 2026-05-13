@@ -59,7 +59,7 @@ class AutoNavCommander(Node):
         rear_bumper_x, width = -0.3, 0.25
 
         if self.is_attached:
-            current_wheelbase = 0.48 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+            current_wheelbase = 1.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
             front_bumper_x = current_wheelbase + 0.3
         else:
             front_bumper_x = 0.3

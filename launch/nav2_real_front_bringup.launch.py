@@ -12,13 +12,13 @@ def generate_launch_description():
     params_file = os.path.join(my_pkg_dir, 'config', 'nav2_real_front_params.yaml')
     ekf_params_file = os.path.join(my_pkg_dir, 'config', 'nav2_real_front_ekf.yaml')
     
-    # 🚨 [수정] 하드코딩된 경로 대신 패키지 디렉토리를 기준으로 동적 할당
+    # [수정] 하드코딩된 경로 대신 패키지 디렉토리를 기준으로 동적 할당
     rviz_config_file = os.path.join(my_pkg_dir, 'rviz', 'front.rviz')
     map_yaml_file = os.path.join(my_pkg_dir, 'maps', '320.yaml')
 
     ld = LaunchDescription()
 
-    # 🚨 [추가] RViz2 그래픽 크래시(exit code -11) 방지를 위한 소프트웨어 렌더링 강제 설정
+    # [추가] RViz2 그래픽 크래시(exit code -11) 방지를 위한 소프트웨어 렌더링 강제 설정
     set_gl_env = SetEnvironmentVariable('LIBGL_ALWAYS_SOFTWARE', '1')
     ld.add_action(set_gl_env)
 
@@ -26,7 +26,7 @@ def generate_launch_description():
     front_nav_group = GroupAction(actions=[
         PushRosNamespace(namespace),
 
-        # 🚨 [유지] 전역 토픽 연결 (멀티봇 TF 및 Map 공유 핵심)
+        # [유지] 전역 토픽 연결 (멀티봇 TF 및 Map 공유 핵심)
         SetRemap(src='tf', dst='/tf'),
         SetRemap(src='tf_static', dst='/tf_static'),
         SetRemap(src='map', dst='/map'),
@@ -139,9 +139,6 @@ def generate_launch_description():
         output='screen' 
     )
 
-    # 🚨 [신규 추가] 11. Static TF (Base Link -> Laser Link)
-    # AMCL이 라이다 스캔 데이터를 로봇 몸체에 맞추려면 반드시 필요한 뼈대입니다.
-    # (높이(0.2m)나 전후 위치(0.1m) 등은 실제 센서 위치에 맞게 수정하세요)
     tf_laser_node = Node(
         package='tf2_ros',
         executable='static_transform_publisher',

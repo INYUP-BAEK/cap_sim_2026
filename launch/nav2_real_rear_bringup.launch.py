@@ -12,7 +12,7 @@ def generate_launch_description():
 
     # 🚨 1. 파일 경로 설정 (SLAM 툴박스 파일 삭제, 2D 맵 파일 추가)
     params_file = os.path.join(cap_sim_dir, 'config', 'nav2_real_rear_params.yaml') # STVL이 적용된 Nav2 파라미터
-    map_file = '/home/inyup/colcon_ws/src/cap_sim_2026/maps/320.yaml' # 👈 아까 파이썬으로 뽑아낸 2D 도면 절대경로!
+    map_file = '/home/baek/colcon_ws/src/cap_sim_2026/maps/320.yaml' # 👈 아까 파이썬으로 뽑아낸 2D 도면 절대경로!
     rviz_config_file = os.path.join(cap_sim_dir, 'rviz', 'my.rviz')
 
     # 실제 로봇 구동이므로 False로 설정합니다.

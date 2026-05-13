@@ -1,127 +1,185 @@
 #!/usr/bin/env python3
 
-import math
-import time
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Bool, Int32
-from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from rclpy.action import ActionClient
+from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped, Polygon, Point32
+from std_msgs.msg import Bool
+import os
+from ament_index_python.packages import get_package_share_directory
 
-def create_pose(navigator, x, y, yaw, frame_id='map'):
-    """x, y, yaw(라디안) 값을 Nav2용 PoseStamped 메시지로 변환하는 헬퍼 함수"""
-    pose = PoseStamped()
-    pose.header.frame_id = frame_id
-    pose.header.stamp = navigator.get_clock().now().to_msg()
-    pose.pose.position.x = x
-    pose.pose.position.y = y
-    pose.pose.position.z = 0.0
-    # Yaw 각도를 쿼터니언으로 변환
-    pose.pose.orientation.z = math.sin(yaw / 2.0)
-    pose.pose.orientation.w = math.cos(yaw / 2.0)
-    return pose
 
-def main():
-    rclpy.init()
+class MultiBotCommander(Node):
+    def __init__(self):
+        super().__init__("multi_bot_commander")
 
-    # 1. 네비게이터 및 통신 노드 초기화
-    # 리어봇(마스터)은 기본 네임스페이스, 프론트봇은 'front' 네임스페이스 사용
-    rear_nav = BasicNavigator()
-    front_nav = BasicNavigator(namespace='front')
+        # ==========================================================
+        # 1. 듀얼 Nav2 액션 클라이언트 (네임스페이스 재정비)
+        # ==========================================================
+        # 리어봇/아커만 모드는 네임스페이스 없음 (Root)
+        self.rear_nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        # 프론트봇은 /front 네임스페이스 사용
+        self.front_nav_client = ActionClient(
+            self, NavigateToPose, "/front/navigate_to_pose"
+        )
 
-    bridge_commander = rclpy.create_node('scenario_commander')
-    detach_pub = bridge_commander.create_publisher(Bool, '/detach_trigger', 10)
-    attach_pub = bridge_commander.create_publisher(Int32, '/robot_attach_topic', 10)
+        # ==========================================================
+        # 2. BT XML 경로 설정
+        # ==========================================================
+        pkg_dir = get_package_share_directory("cap_sim_2026")
+        self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
+        self.ackermann_bt_path = os.path.join(
+            pkg_dir, "bt_xml", "ackermann_nav_tree.xml"
+        )
 
-    # Nav2 서버들이 완전히 켜질 때까지 대기
-    rear_nav.waitUntilNav2Active(localizer='bt_navigator')
-    front_nav.waitUntilNav2Active(localizer='bt_navigator')
-    bridge_commander.get_logger().info("🔥 두 로봇의 Nav2 시스템 준비 완료! 시나리오를 시작합니다.")
+        # ==========================================================
+        # 3. 듀얼 풋프린트 퍼블리셔 (네임스페이스 재정비)
+        # ==========================================================
+        # 리어봇 코스트맵 (네임스페이스 없음)
+        self.rear_global_fp_pub = self.create_publisher(
+            Polygon, "global_costmap/footprint", 10
+        )
+        self.rear_local_fp_pub = self.create_publisher(
+            Polygon, "local_costmap/footprint", 10
+        )
 
-    # =====================================================================
-    # [Step 1 & 2] 웨이포인트 팔로잉 (카트 탐색 및 접근) - 아커만 모드
-    # =====================================================================
-    bridge_commander.get_logger().info("▶️ [Step 1&2] 카트 탐색을 위해 웨이포인트 주행을 시작합니다 (아커만 모드)")
-    
-    # 예시 웨이포인트 3개 (실제 맵에 맞게 수정 필요)
-    waypoints = [
-        create_pose(rear_nav, 7.2, 2.5, 0.0),
-        create_pose(rear_nav, 5.3, -4.7, 3.14),
-        create_pose(rear_nav, -6.3, -1.0, -1.57) # 카트와 가장 가까운 최종 도착지
-    ]
-    
-    rear_nav.followWaypoints(waypoints)
-    while not rear_nav.isTaskComplete():
-        time.sleep(1.0)
-        # 필요시 여기서 카메라 객체 인식 코드를 섞을 수 있습니다.
-        
-    bridge_commander.get_logger().info("✅ 카트 앞 도착 완료!")
+        # 프론트봇 코스트맵 (/front)
+        self.front_global_fp_pub = self.create_publisher(
+            Polygon, "/front/global_costmap/footprint", 10
+        )
+        self.front_local_fp_pub = self.create_publisher(
+            Polygon, "/front/local_costmap/footprint", 10
+        )
 
-    # =====================================================================
-    # [Step 3] 로봇 분리 (디퍼런셜 모드 전환)
-    # =====================================================================
-    bridge_commander.get_logger().info("▶️ [Step 3] 로봇 합체 해제 (디퍼런셜 모드로 전환)")
-    
-    detach_msg = Bool()
-    detach_msg.data = True
-    detach_pub.publish(detach_msg)
-    time.sleep(2.0) # 물리 엔진이 안정화될 시간 2초 부여
+        # 상태 변수
+        self.is_attached = True  # 초기값: 합체 상태
+        self.cart_count = 0
 
-    # =====================================================================
-    # [Step 4] 카트 앞뒤 정렬 및 도킹
-    # =====================================================================
-    bridge_commander.get_logger().info("▶️ [Step 4] 카트 앞뒤로 정렬하기 위해 개별 주행 시작")
-    
-    # 카트 1번을 기준으로 앞/뒤 도킹 위치 (실제 좌표 측정 필요)
-    # 프론트봇은 카트 앞(cart_front)으로, 리어봇은 카트 뒤(cart_rear)로 이동
-    front_docking_pose = create_pose(front_nav, 5.0, -2.0, 0.0)
-    rear_docking_pose = create_pose(rear_nav, 3.5, -2.0, 0.0)
+        # ==========================================================
+        # 4. 구독(Subscriber) 설정
+        # ==========================================================
+        self.docking_sub = self.create_subscription(
+            Bool, "docking_state", self.docking_callback, 10
+        )
 
-    # 두 로봇에게 동시에 명령 하달 (비동기)
-    front_nav.goToPose(front_docking_pose)
-    rear_nav.goToPose(rear_docking_pose)
+        # 리어봇(마스터) 목적지: /mission_goal
+        self.rear_goal_sub = self.create_subscription(
+            PoseStamped, "mission_goal", self.rear_goal_callback, 10
+        )
+        # 프론트봇 단독 목적지: /front/mission_goal
+        self.front_goal_sub = self.create_subscription(
+            PoseStamped, "/front/mission_goal", self.front_goal_callback, 10
+        )
 
-    # 두 로봇이 모두 목표에 도달할 때까지 대기
-    while not front_nav.isTaskComplete() or not rear_nav.isTaskComplete():
-        time.sleep(0.5)
+        self.get_logger().info(
+            "🤖 [DDS Multi-Bot Commander] 가동 완료! 메인(Rear) / 서브(Front) 통신 대기 중."
+        )
+        self.update_dual_footprints()
 
-    bridge_commander.get_logger().info("✅ 정렬 완료! 물리적 도킹을 시도합니다.")
-    
-    # 1번 카트 결합 시그널 발송 (브리지 코드 매핑 기준: 4=프론트-카트1, 1=리어-카트1)
-    attach_msg = Int32()
-    attach_msg.data = 4
-    attach_pub.publish(attach_msg)
-    time.sleep(1.0)
-    
-    attach_msg.data = 1
-    attach_pub.publish(attach_msg)
-    time.sleep(2.0) # 찰칵! 도킹되는 시간 대기
+    def docking_callback(self, msg):
+        previous_state = self.is_attached
+        self.is_attached = msg.data
 
-    # =====================================================================
-    # [Step 5] 기차 모드로 출발점 복귀 (Long Ackermann 모드)
-    # =====================================================================
-    bridge_commander.get_logger().info("▶️ [Step 5] 로봇-카트-로봇 기차 결합 완료. 출발점으로 복귀합니다.")
-    
-    # 🚨 핵심: 파이썬 브리지가 '아커만 기구학(wheelbase 연장)'을 쓰도록 다시 is_attached = True로 만듦
-    detach_msg.data = False 
-    detach_pub.publish(detach_msg)
-    time.sleep(1.0)
+        if self.is_attached != previous_state:
+            mode_str = (
+                "아커만 (합체, 리어봇 주도)"
+                if self.is_attached
+                else "디퍼런셜 (분리, 독립 주행)"
+            )
+            self.get_logger().info(f"🔄 [형태 변환] 모드 전환: {mode_str}")
 
-    # 마스터인 리어봇에게 출발점(Home) 좌표 명령
-    home_pose = create_pose(rear_nav, 0.0, 0.0, 3.14)
-    rear_nav.goToPose(home_pose)
+            if self.is_attached:
+                self.cancel_front_bot_goal()
 
-    while not rear_nav.isTaskComplete():
-        time.sleep(1.0)
+            self.update_dual_footprints()
 
-    if rear_nav.getResult() == TaskResult.SUCCEEDED:
-        bridge_commander.get_logger().info("🎉🎉🎉 모든 시나리오 임무 완수! 복귀 성공! 🎉🎉🎉")
-    else:
-        bridge_commander.get_logger().error("❌ 복귀 중 문제가 발생했습니다.")
+    def update_dual_footprints(self):
+        rear_fp_msg = Polygon()
+        front_fp_msg = Polygon()
+        width = 0.25
+        rear_bumper_x = -0.3
 
-    # 종료
-    bridge_commander.destroy_node()
-    rclpy.shutdown()
+        if self.is_attached:
+            # [합체] 리어봇이 프론트봇 크기까지 덮음
+            current_wheelbase = (
+                0.48 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+            )
+            huge_front_x = current_wheelbase + 0.3
 
-if __name__ == '__main__':
+            rear_fp_msg.points = [
+                Point32(x=huge_front_x, y=-width, z=0.0),
+                Point32(x=huge_front_x, y=width, z=0.0),
+                Point32(x=rear_bumper_x, y=width, z=0.0),
+                Point32(x=rear_bumper_x, y=-width, z=0.0),
+            ]
+            # 프론트봇은 점(Point) 처리하여 잉여 연산 방지
+            front_fp_msg.points = [
+                Point32(x=0.01, y=-0.01, z=0.0),
+                Point32(x=0.01, y=0.01, z=0.0),
+                Point32(x=-0.01, y=0.01, z=0.0),
+                Point32(x=-0.01, y=-0.01, z=0.0),
+            ]
+        else:
+            # [분리] 각자 크기 복구
+            small_front_x = 0.3
+            rear_fp_msg.points = [
+                Point32(x=small_front_x, y=-width, z=0.0),
+                Point32(x=small_front_x, y=width, z=0.0),
+                Point32(x=rear_bumper_x, y=width, z=0.0),
+                Point32(x=rear_bumper_x, y=-width, z=0.0),
+            ]
+            front_fp_msg.points = rear_fp_msg.points
+
+        self.rear_global_fp_pub.publish(rear_fp_msg)
+        self.rear_local_fp_pub.publish(rear_fp_msg)
+        self.front_global_fp_pub.publish(front_fp_msg)
+        self.front_local_fp_pub.publish(front_fp_msg)
+        self.get_logger().info("📐 풋프린트 동기화 완료.")
+
+    def rear_goal_callback(self, msg: PoseStamped):
+        self.get_logger().info(f"📥 [Rear/Ackermann] 명령 수신")
+        if not self.rear_nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Rear Nav2 서버 다운!")
+            return
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = msg
+        goal_msg.behavior_tree = (
+            self.ackermann_bt_path if self.is_attached else self.diff_bt_path
+        )
+        self.rear_nav_client.send_goal_async(goal_msg)
+
+    def front_goal_callback(self, msg: PoseStamped):
+        if self.is_attached:
+            self.get_logger().warn("⚠️ [Front Bot] 합체 상태! 단독 주행 명령 무시.")
+            return
+
+        self.get_logger().info(f"📥 [Front Bot] 독립 명령 수신")
+        if not self.front_nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Front Nav2 서버 다운!")
+            return
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = msg
+        goal_msg.behavior_tree = self.diff_bt_path
+        self.front_nav_client.send_goal_async(goal_msg)
+
+    def cancel_front_bot_goal(self):
+        self.get_logger().info("🛑 프론트봇 독립 주행 강제 정지 명령 전송 (구현 필요)")
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = MultiBotCommander()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
     main()
