@@ -100,7 +100,7 @@ class AutoNavCommander(Node):
             # ==========================================
             # [리어봇]: 프론트봇과 카트까지 모두 포함하는 거대한 통합 풋프린트
             current_wheelbase = (
-                0.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+                1.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
             )#1.45
             rear_front_bumper_x = current_wheelbase + 0.3
 
