@@ -16,17 +16,17 @@ controller_server:
     # ==========================================================
     FollowPathAckermann:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 80                 
-      model_dt: 0.08                 
-      batch_size: 2000               
+      time_steps: 80
+      model_dt: 0.08
+      batch_size: 2000
       
       # [이론값 2] 탐색 노이즈를 속도 한계치에 비례하게 초기화
-      vx_std: 0.1                    
-      vy_std: 0.0                    
-      wz_std: 0.3                   
+      vx_std: 0.1
+      vy_std: 0.0
+      wz_std: 0.2
       
       # [이론값 3] 잭나이프 방지 및 조향 한계
-      vx_max: 0.25                
+      vx_max: 0.25
       vx_min: -0.15                    # 🚨 절대 후진 금지 (오직 전진만으로 경로 복구)
       vy_max: 0.0
       vy_min: 0.0
@@ -34,9 +34,9 @@ controller_server:
       wz_min: -0.25
       
       iteration_count: 1
-      prune_distance: 2.5            
-      transform_tolerance: 0.5 
-      temperature: 0.3               
+      prune_distance: 2.5
+      transform_tolerance: 0.5
+      temperature: 0.3
       gamma: 0.015
       motion_model: "Ackermann"
       visualize: false 
@@ -86,18 +86,22 @@ controller_server:
         max_heuristic_delay: 0.1
         trajectory_point_step: 4
       
-      # [이론값 5] 선 따라가기와 각도 맞추기 가중치를 1:1로 동일하게 초기화 (기교 배제)
+# [수정] 오버슈팅(뱀걸음) 방지를 위한 가중치 역전 세팅
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 4.0               
+        # 🚨 [수정 1] 4.0 -> 2.0 : 선에 무식하게 집착하는 성향을 낮춥니다.
+        cost_weight: 2.0               
         offset_from_furthest: 20
         threshold_to_consider: 0.4
+        
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 2.0
-        offset_from_furthest: 15
+        # 🚨 [수정 2] 2.0 -> 3.5 (또는 3.0) : 로봇 몸통이 선의 흐름(각도)과 평행해지도록 최우선 유도합니다.
+        cost_weight: 3.5
+        # 🚨 [수정 3] 15 -> 5 ~ 10 : 너무 먼 미래의 각도보다, 당장 내 앞의 각도를 우선해서 맞추도록 시야를 조금 당겨줍니다.
+        offset_from_furthest: 10
         threshold_to_consider: 0.5
         max_angle_to_prefer: 0.785
 
@@ -199,7 +203,7 @@ planner_server:
       
       change_penalty: 1.0            # 전후진 와리가리 금지
       reverse_penalty: 1.5           # 후진 진입 억제
-      cost_penalty: 2.5              # 벽 기피
+      cost_penalty: 5.0              # 벽 기피
 
     PlannerDiff:
       plugin: "nav2_smac_planner/SmacPlanner2D"
@@ -341,7 +345,7 @@ global_costmap:
           topic: /camera/depth/voxel_cloud
           marking: true
           clearing: true
-          obstacle_range: 3.0            
+          obstacle_range: 3.0
           min_obstacle_height: 0.05
           max_obstacle_height: 1.5
           v_fov: 1.01

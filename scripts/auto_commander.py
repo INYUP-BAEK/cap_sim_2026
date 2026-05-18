@@ -39,6 +39,9 @@ class AutoNavCommander(Node):
             Polygon, "/local_costmap/footprint", 10
         )
 
+        self.front_global_footprint_pub = self.create_publisher(Polygon, '/front/global_costmap/footprint', 10)
+        self.front_local_footprint_pub = self.create_publisher(Polygon, '/front/local_costmap/footprint', 10)
+
         # ==========================================================
         # ⏱️ [추가] 3초 쿨다운 관리를 위한 변수 초기화
         # ==========================================================
@@ -76,32 +79,81 @@ class AutoNavCommander(Node):
     def docking_callback(self, msg):
         self.is_attached = msg.data
         self.update_nav2_footprint()
+        
         if self.is_attached:
-            mode_str = "아커만(합체)"
+            mode_str = "아커만(합체) - 프론트봇 풋프린트 최소화 적용"
         else:
-            mode_str = "디퍼런셜(분리)"
+            mode_str = "디퍼런셜(분리) - 개별 풋프린트 복구"
         self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
 
     def update_nav2_footprint(self):
-        msg = Polygon()
-        rear_bumper_x, width = -0.3, 0.25
+        rear_msg = Polygon()
+        front_msg = Polygon()
+
+        # 리어봇의 기본 폭 및 후면 범퍼 위치 (공통)
+        rear_width = 0.25
+        rear_bumper_x = -0.3
 
         if self.is_attached:
+            # ==========================================
+            # 1. 아커만 모드 (합체 상태)
+            # ==========================================
+            # [리어봇]: 프론트봇과 카트까지 모두 포함하는 거대한 통합 풋프린트
             current_wheelbase = (
-                1.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
-            )
-            front_bumper_x = current_wheelbase + 0.3
-        else:
-            front_bumper_x = 0.3
+                0.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+            )#1.45
+            rear_front_bumper_x = current_wheelbase + 0.3
 
-        msg.points = [
-            Point32(x=front_bumper_x, y=-width, z=0.0),
-            Point32(x=front_bumper_x, y=width, z=0.0),
-            Point32(x=rear_bumper_x, y=width, z=0.0),
-            Point32(x=rear_bumper_x, y=-width, z=0.0),
-        ]
-        self.global_footprint_pub.publish(msg)
-        self.local_footprint_pub.publish(msg)
+            rear_msg.points = [
+                Point32(x=rear_front_bumper_x, y=-rear_width, z=0.0),
+                Point32(x=rear_front_bumper_x, y=rear_width, z=0.0),
+                Point32(x=rear_bumper_x, y=rear_width, z=0.0),
+                Point32(x=rear_bumper_x, y=-rear_width, z=0.0),
+            ]
+
+            # [프론트봇]: 합체 시 리어봇의 풋프린트 안에 들어가므로, 
+            # 프론트봇 자체의 Nav2가 길을 막혔다고 착각하지 않도록 1cm 크기로 무력화
+            tiny_size = 0.01
+            front_msg.points = [
+                Point32(x=tiny_size, y=-tiny_size, z=0.0),
+                Point32(x=tiny_size, y=tiny_size, z=0.0),
+                Point32(x=-tiny_size, y=tiny_size, z=0.0),
+                Point32(x=-tiny_size, y=-tiny_size, z=0.0),
+            ]
+
+        else:
+            # ==========================================
+            # 2. 디퍼런셜 모드 (분리 상태)
+            # ==========================================
+            # [리어봇]: 자신만의 독립적인 크기로 복귀
+            rear_front_bumper_x = 0.3
+            rear_msg.points = [
+                Point32(x=rear_front_bumper_x, y=-rear_width, z=0.0),
+                Point32(x=rear_front_bumper_x, y=rear_width, z=0.0),
+                Point32(x=rear_bumper_x, y=rear_width, z=0.0),
+                Point32(x=rear_bumper_x, y=-rear_width, z=0.0),
+            ]
+
+            # [프론트봇]: 자신만의 독립적인 크기로 복귀 
+            # (※ 필요시 프론트봇의 실제 하드웨어 치수에 맞게 숫자 수정 필요)
+            front_front_bumper_x = 0.3
+            front_rear_bumper_x = -0.3
+            front_width = 0.25
+
+            front_msg.points = [
+                Point32(x=front_front_bumper_x, y=-front_width, z=0.0),
+                Point32(x=front_front_bumper_x, y=front_width, z=0.0),
+                Point32(x=front_rear_bumper_x, y=front_width, z=0.0),
+                Point32(x=front_rear_bumper_x, y=-front_width, z=0.0),
+            ]
+
+        # 리어봇 풋프린트 퍼블리시 (기존 코드)
+        self.global_footprint_pub.publish(rear_msg)
+        self.local_footprint_pub.publish(rear_msg)
+
+        # 프론트봇 풋프린트 퍼블리시 (신규 추가)
+        self.front_global_footprint_pub.publish(front_msg)
+        self.front_local_footprint_pub.publish(front_msg)
 
     # ----------------------------------------------------------
     # 🛒 카트 타겟 수신 및 좌표 변환 콜백 함수 (정지 거리 + 시선 각도 적용)
