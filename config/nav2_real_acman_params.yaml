@@ -10,23 +10,29 @@ controller_server:
     goal_checker_plugins: ["general_goal_checker"] 
     controller_plugins: ["FollowPathAckermann", "FollowPathDiff"]
 
+    # ==========================================================
+    # 🚛 1. 합체 모드 : 1.45m 휠베이스 거구 최적화
+    # ==========================================================
     FollowPathAckermann:
       plugin: "nav2_mppi_controller::MPPIController"
 
+      # 6.4초의 시야 유지 (무거운 카트의 제동/조향 타이밍 확보)
       time_steps: 80
       model_dt: 0.08
       batch_size: 1500
 
-      vx_std: 0.08
+      vx_std: 0.10
       vy_std: 0.0
-      wz_std: 0.24
+      # 🚨 [최적화] 부드러운 핸들링을 위해 노이즈 하향
+      wz_std: 0.15
 
       vx_max: 0.18
       vx_min: -0.05
       vy_max: 0.0
       vy_min: 0.0
-      wz_max: 0.32
-      wz_min: -0.32
+      # 🚨 [최적화] 긴급 경로 복귀를 위해 조향 한계를 스무더와 함께 상향
+      wz_max: 0.35
+      wz_min: -0.35
 
       iteration_count: 1
       prune_distance: 1.0
@@ -42,14 +48,17 @@ controller_server:
         time_step: 3
 
       AckermannConstraints:
-        min_turning_r: 1.05
+        # 🚨 [최적화] 저속 조향 데드락 방지. 몸통의 한계 제약을 대폭 완화하여 
+        # MPPI가 궤적을 섣불리 삭제(사형)하지 못하게 방어.
+        min_turning_r: 0.60
 
       critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
 
+      # 🚨 [최적화] 인플레이션이 걸려있던 크리틱 가중치를 모두 정규화
       ConstraintCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 7.0
+        cost_weight: 4.0
 
       GoalCritic:
         enabled: true
@@ -66,7 +75,8 @@ controller_server:
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 8.0
+        # 🚨 [핵심 해결] 직진 똥고집을 꺾어, 경로가 휘면 무조건 감속 후 조향하도록 강제
+        cost_weight: 0.5
         threshold_to_consider: 4.0
 
       ObstaclesCritic:
@@ -82,33 +92,36 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 10.0
+        cost_weight: 3.0
         max_heuristic_delay: 0.1
         trajectory_point_step: 4
 
+# 변경 전: 4.0 -> 변경 후: 3.0 (선에 무조건 딱 붙으려는 집착을 약간 내려놓음)
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 12.0
+        cost_weight: 3.0               
         offset_from_furthest: 10
         threshold_to_consider: 4.0
 
+      # 변경 전: 3.0 -> 변경 후: 4.0 (대신 차체를 선과 평행하게 정렬하는 것을 최우선으로 삼음)
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 8.0
+        cost_weight: 4.0
         offset_from_furthest: 8
         threshold_to_consider: 2.0
         max_angle_to_prefer: 1.047
 
     # ==========================================================
-    # ✂️ 2. 분리 모드 : 디퍼런셜 주행
+    # ✂️ 2. 분리 모드 : 디퍼런셜 주행 (유지 및 동기화)
     # ==========================================================
     FollowPathDiff:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 50                 
+      # [검증] 서버 주기 충돌 방지를 위해 아커만과 동일한 시야 구조로 변경
+      time_steps: 80                 
       model_dt: 0.08                 
-      batch_size: 2000               
+      batch_size: 1500               
       vx_std: 0.2                    
       vy_std: 0.0                    
       wz_std: 0.6                    
@@ -186,8 +199,8 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      # [최적화] 짧은 로봇 길이에 맞춰 정밀 타격 (10cm 오차 허용)
-      xy_goal_tolerance: 0.10  
+      # [검증] 1.45m 거구에 맞는 주차 여유 공간 (무한 춤추기 방지)
+      xy_goal_tolerance: 0.20  
       yaw_goal_tolerance: 0.5  
       
     progress_checker:
@@ -209,10 +222,11 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
-
       motion_model_for_search: "REEDS_SHEPP"
 
-      minimum_turning_radius: 1.15
+      # 🚨 [핵심 해결] 뇌(플래너)는 몸통(1.15m 한계)보다 여유롭게 그림을 그리도록 1.35m 부여.
+      # 이제 코너에서 벗어나도 핸들을 더 꺾어서 복구할 수 있는 "여유 예산"이 생깁니다.
+      minimum_turning_radius: 1.35
 
       reverse_penalty: 8.0
       change_penalty: 4.0
@@ -313,7 +327,6 @@ global_costmap:
       resolution: 0.05
       track_unknown_space: true
       
-      # 🚨 [최적화] 0.48m 직결 로봇에 맞춘 소형 풋프린트
       footprint: '[[-0.45, -0.25], [1.65, -0.25], [1.65, 0.25], [-0.45, 0.25]]'
       footprint_padding: 0.03
       
@@ -401,8 +414,9 @@ velocity_smoother:
     use_sim_time: false
     odom_topic: /odometry
 
-    max_velocity: [0.18, 0.0, 0.32]
-    min_velocity: [-0.05, 0.0, -0.32]
+    # 🚨 [검증] MPPI의 wz_max 상향(0.35)에 맞춰 스무더의 리미트 해제
+    max_velocity: [0.18, 0.0, 0.35]
+    min_velocity: [-0.05, 0.0, -0.35]
 
     max_accel: [0.18, 0.0, 0.55]
     max_decel: [-0.30, 0.0, -0.65]
