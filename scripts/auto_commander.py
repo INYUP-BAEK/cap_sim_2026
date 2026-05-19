@@ -77,10 +77,10 @@ class AutoNavCommander(Node):
     def load_nav2_yaml_params(self, is_long_wheelbase):
         # 🚨 주의: 시스템 환경에 맞는 절대 경로 사용
         if is_long_wheelbase:
-            yaml_path = "/home/inyup/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml"
+            yaml_path = "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml"
             self.get_logger().info("🚛 [파라미터 체인지] 카트 결합 모드(1.45m) YAML 적용 중...")
         else:
-            yaml_path = "/home/inyup/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
+            yaml_path = "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
             self.get_logger().info("🏎️ [파라미터 체인지] 직결 모드(0.48m) YAML 적용 중...")
 
         if not os.path.exists(yaml_path):
@@ -97,15 +97,15 @@ class AutoNavCommander(Node):
         ]
 
         # 비동기로 터미널 명령어 실행 (Main Thread 블로킹 방지)
-        for node in target_nodes:
-            try:
-                subprocess.Popen(
-                    ['ros2', 'param', 'load', node, yaml_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-            except Exception as e:
-                self.get_logger().error(f"❌ {node} 파라미터 로드 실패: {e}")
+        # for node in target_nodes:
+        #     try:
+        #         subprocess.Popen(
+        #             ['ros2', 'param', 'load', node, yaml_path],
+        #             stdout=subprocess.DEVNULL,
+        #             stderr=subprocess.DEVNULL
+        #         )
+        #     except Exception as e:
+        #         self.get_logger().error(f"❌ {node} 파라미터 로드 실패: {e}")
         
         self.get_logger().info("✅ 파라미터 실시간 덮어씌우기 명령 전달 완료!")
     
@@ -117,7 +117,7 @@ class AutoNavCommander(Node):
 
         # 2. 결합 상태에 맞춰 YAML 파라미터 파일 전체 스위칭
         is_long = self.is_attached and (self.cart_count > 0)
-        self.load_nav2_yaml_params(is_long_wheelbase=is_long)
+        # self.load_nav2_yaml_params(is_long_wheelbase=is_long)
         
         if self.is_attached:
             mode_str = "아커만(합체) - 프론트봇 풋프린트 최소화 적용"
@@ -134,7 +134,7 @@ class AutoNavCommander(Node):
 
         if self.is_attached:
             current_wheelbase = (
-                1.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
+                    1.45 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
             )
             rear_front_bumper_x = current_wheelbase + 0.3
 
