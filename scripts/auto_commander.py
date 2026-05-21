@@ -62,14 +62,14 @@ class AutoNavCommander(Node):
 
     def docking_callback(self, msg: Bool):
         self.is_attached = msg.data
-        
+
         # 1. 동적 풋프린트 실시간 퍼블리시
         self.update_nav2_footprint()
 
         # 2. 결합 상태에 맞춰 YAML 파라미터 파일 스위칭
         is_long = self.is_attached and (self.cart_count > 0)
         self.load_nav2_yaml_params(is_long_wheelbase=is_long)
-        
+
         mode_str = "아커만(합체) - 프론트봇 풋프린트 최소화" if self.is_attached else "디퍼런셜(분리) - 개별 풋프린트 복구"
         self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
 
@@ -86,7 +86,7 @@ class AutoNavCommander(Node):
 
             # 결합 상태: 리어봇은 길게, 프론트봇은 점(더미) 처리
             rear_msg = self._create_polygon(rear_front_bumper_x, rear_bumper_x, rear_width)
-            
+
             tiny_size = 0.01
             front_msg = self._create_polygon(tiny_size, -tiny_size, tiny_size)
         else:
@@ -179,7 +179,7 @@ class AutoNavCommander(Node):
         if not goal_handle.accepted:
             self.get_logger().error("Nav2가 주행을 거부했습니다.")
             return
-        
+
         self.get_logger().info("🚀 Nav2 자율주행 시작!")
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
@@ -190,10 +190,14 @@ class AutoNavCommander(Node):
     # ----------------------------------------------------------
     # 🛠️ 내부 헬퍼 메서드 (YAML 파라미터 로딩 및 풋프린트 생성용)
     # ----------------------------------------------------------
+    # ----------------------------------------------------------
+    # 🛠️ 내부 헬퍼 메서드 (YAML 파라미터 로딩 및 풋프린트 생성용)
+    # ----------------------------------------------------------
     def load_nav2_yaml_params(self, is_long_wheelbase):
         yaml_path = (
-            "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml" if is_long_wheelbase else 
-            "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
+            "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml"
+            if is_long_wheelbase
+            else "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
         )
         mode = "카트 결합 모드(1.45m)" if is_long_wheelbase else "직결 모드(0.48m)"
         self.get_logger().info(f"🚛 [파라미터 체인지] {mode} YAML 적용 중...")
@@ -202,7 +206,7 @@ class AutoNavCommander(Node):
             self.get_logger().error(f"❌ YAML 파일을 찾을 수 없습니다: {yaml_path}")
             return
 
-        with open(yaml_path, 'r') as file:
+        with open(yaml_path, "r") as file:
             try:
                 yaml_data = yaml.safe_load(file)
             except yaml.YAMLError as exc:
@@ -210,21 +214,32 @@ class AutoNavCommander(Node):
                 return
 
         node_target_map = {
-            'controller_server': '/controller_server',
-            'planner_server': '/planner_server',
-            'local_costmap': '/local_costmap/local_costmap',
-            'global_costmap': '/global_costmap/global_costmap',
-            'velocity_smoother': '/velocity_smoother'
+            "controller_server": "/controller_server",
+            "planner_server": "/planner_server",
+            "local_costmap": "/local_costmap/local_costmap",
+            "global_costmap": "/global_costmap/global_costmap",
+            "velocity_smoother": "/velocity_smoother",
         }
 
         for yaml_key, node_name in node_target_map.items():
-            if yaml_key in yaml_data and 'ros__parameters' in yaml_data[yaml_key]:
-                flat_params = self._flatten_dict(yaml_data[yaml_key]['ros__parameters'])
+            if yaml_key not in yaml_data:
+                continue
+
+            target_data = yaml_data[yaml_key]
+
+            # [수정 1] costmap 노드의 이중 계층 구조(depth) 파싱 처리
+            if yaml_key in target_data:
+                target_data = target_data[yaml_key]
+
+            if "ros__parameters" in target_data:
+                flat_params = self._flatten_dict(target_data["ros__parameters"])
                 self._send_parameters_to_node(node_name, flat_params)
             else:
-                self.get_logger().warn(f"⚠️ {yaml_key} 파라미터를 YAML에서 찾을 수 없습니다.")
+                self.get_logger().warn(
+                    f"⚠️ {yaml_key} 파라미터를 YAML에서 찾을 수 없습니다."
+                )
 
-    def _flatten_dict(self, d, parent_key='', sep='.'):
+    def _flatten_dict(self, d, parent_key="", sep="."):
         items = []
         for k, v in d.items():
             new_key = f"{parent_key}{sep}{k}" if parent_key else k
@@ -236,26 +251,40 @@ class AutoNavCommander(Node):
 
     def _send_parameters_to_node(self, node_name, flat_params):
         client = self.create_client(SetParameters, f"{node_name}/set_parameters")
-        if not client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().error(f"❌ {node_name} 서비스 연결 실패. 노드가 켜져 있나요?")
+
+        # [수정 2] Timeout 시간 증가 (Nav2 노드 응답 지연 대비)
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error(
+                f"❌ {node_name} 서비스 연결 실패. 노드가 죽었거나 연결 지연 중입니다."
+            )
             return
 
         request = SetParameters.Request()
         for name, value in flat_params.items():
+            # 🚨 [수정됨] 리스트 형태(플러그인) 차단 + 'footprint' 파라미터 전송 차단
+            # footprint는 오직 Topic으로만 제어하기 위해 YAML 파라미터 업데이트에서 제외합니다.
+            if isinstance(value, list) or name == 'footprint':
+                continue
+                
             try:
                 request.parameters.append(Parameter(name, value=value).to_parameter_msg())
             except Exception as e:
                 self.get_logger().error(f"❌ 파라미터 변환 실패 ({name}: {value}): {e}")
-
         future = client.call_async(request)
-        future.add_done_callback(lambda fut: self._parameter_set_callback(fut, node_name))
+
+        # [수정 4] 파이썬 람다 클로저(Closure) 버그 수정 -> 각 노드 이름이 정상적으로 로그에 찍힘
+        future.add_done_callback(
+            lambda fut, n=node_name: self._parameter_set_callback(fut, n)
+        )
 
     def _parameter_set_callback(self, future: Future, node_name: str):
         try:
             response = future.result()
             failed = [res.reason for res in response.results if not res.successful]
             if failed:
-                self.get_logger().warn(f"⚠️ {node_name} 일부 파라미터 업데이트 실패: {failed}")
+                self.get_logger().warn(
+                    f"⚠️ {node_name} 일부 파라미터 업데이트 거부됨: {failed}"
+                )
             else:
                 self.get_logger().info(f"✅ {node_name} 파라미터 실시간 업데이트 완료!")
         except Exception as e:
