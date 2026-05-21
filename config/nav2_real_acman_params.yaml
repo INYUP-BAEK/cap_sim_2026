@@ -17,12 +17,12 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
 
       # 6.4초의 시야 유지 (무거운 카트의 제동/조향 타이밍 확보)
-      time_steps: 60
-      model_dt: 0.06
-      batch_size: 1200
+      time_steps: 70
+      model_dt: 0.07
+      batch_size: 1500
       vx_std: 0.08
       vy_std: 0.0
-      wz_std: 0.55
+      wz_std: 0.25
       vx_max: 0.18
       vx_min: -0.1
       vy_max: 0.0
@@ -78,7 +78,7 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 18.0
+        cost_weight: 10.0
         max_heuristic_delay: 0.1
         trajectory_point_step: 2
         threshold_to_consider: 0.5
@@ -88,13 +88,13 @@ controller_server:
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 12.0
+        cost_weight: 10.0
         offset_from_furthest: 3
         threshold_to_consider: 1.2
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 1.5
+        cost_weight: 5.0
         offset_from_furthest: 3
         threshold_to_consider: 0.5
         max_angle_to_prefer: 0.785
@@ -109,19 +109,19 @@ controller_server:
       time_steps: 80                 
       model_dt: 0.08                 
       batch_size: 1500               
-      vx_std: 0.2                    
-      vy_std: 0.0                    
-      wz_std: 0.6                    
-      vx_max: 0.35                   
+      vx_std: 0.2
+      vy_std: 0.0
+      wz_std: 0.6
+      vx_max: 0.35
       vx_min: -0.35
       vy_max: 0.0
       vy_min: 0.0
-      wz_max: 1.0                    
+      wz_max: 1.0
       wz_min: -1.0
       iteration_count: 1
-      prune_distance: 1.7            
+      prune_distance: 1.7
       transform_tolerance: 0.5 
-      temperature: 0.3               
+      temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"      
       visualize: false              
@@ -399,16 +399,15 @@ velocity_smoother:
     use_sim_time: false
     odom_topic: /odometry
 
-    # 🚨 [검증] MPPI의 wz_max 상향(0.35)에 맞춰 스무더의 리미트 해제
     max_velocity: [0.18, 0.0, 0.55]
     min_velocity: [-0.1, 0.0, -0.55]
 
-    max_accel: [0.12, 0.0, 0.5]
-    max_decel: [-0.15, 0.0, -0.5]
+    # 🚨 [핵심 수정 6] 조향 각가속도(Jerk)를 0.5 ➡️ 0.25로 절반으로 낮춰 물리적 뱀걸음 억제
+    max_accel: [0.12, 0.0, 0.25]
+    max_decel: [-0.15, 0.0, -0.3]
 
     smoothing_frequency: 20.0
     feedback: OPEN_LOOP
-
 smoother_server:
   ros__parameters:
     use_sim_time: false

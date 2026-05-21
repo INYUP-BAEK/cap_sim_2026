@@ -1,177 +1,374 @@
 #!/usr/bin/env python3
 
+import os
+import math
+import yaml
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from nav2_msgs.action import NavigateToPose
-from geometry_msgs.msg import PoseStamped, Polygon, Point32
-from std_msgs.msg import Bool
-import os
+from rclpy.parameter import Parameter
+from rclpy.task import Future
+from rcl_interfaces.srv import SetParameters
+
+from nav2_msgs.action import NavigateToPose, FollowWaypoints
+from geometry_msgs.msg import PoseStamped, Polygon, Point32, PointStamped
+from std_msgs.msg import Bool, UInt16, Empty
+
 from ament_index_python.packages import get_package_share_directory
+import tf2_ros
+import tf2_geometry_msgs
 
 
-class MultiBotCommander(Node):
+class AutoNavCommander(Node):
     def __init__(self):
-        super().__init__("multi_bot_commander")
+        super().__init__("auto_nav_commander")
 
-        # ==========================================================
-        # 1. 듀얼 Nav2 액션 클라이언트 (네임스페이스 재정비)
-        # ==========================================================
-        # 리어봇/아커만 모드는 네임스페이스 없음 (Root)
-        self.rear_nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
-        # 프론트봇은 /front 네임스페이스 사용
-        self.front_nav_client = ActionClient(
-            self, NavigateToPose, "/front/navigate_to_pose"
-        )
-
-        # ==========================================================
-        # 2. BT XML 경로 설정
-        # ==========================================================
+        # 1. Nav2 액션 클라이언트 및 BT XML 경로 설정
+        self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.wp_client = ActionClient(self, FollowWaypoints, "follow_waypoints")
+        
         pkg_dir = get_package_share_directory("cap_sim_2026")
         self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
-        self.ackermann_bt_path = os.path.join(
-            pkg_dir, "bt_xml", "ackermann_nav_tree.xml"
-        )
+        self.ackermann_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_nav_tree.xml")
 
-        # ==========================================================
-        # 3. 듀얼 풋프린트 퍼블리셔 (네임스페이스 재정비)
-        # ==========================================================
-        # 리어봇 코스트맵 (네임스페이스 없음)
-        self.rear_global_fp_pub = self.create_publisher(
-            Polygon, "global_costmap/footprint", 10
-        )
-        self.rear_local_fp_pub = self.create_publisher(
-            Polygon, "local_costmap/footprint", 10
-        )
-
-        # 프론트봇 코스트맵 (/front)
-        self.front_global_fp_pub = self.create_publisher(
-            Polygon, "/front/global_costmap/footprint", 10
-        )
-        self.front_local_fp_pub = self.create_publisher(
-            Polygon, "/front/local_costmap/footprint", 10
-        )
-
-        # 상태 변수
-        self.is_attached = True  # 초기값: 합체 상태
+        # 2. 로봇 상태 및 주행 관리 변수 (State Machine)
+        self.is_attached = True
         self.cart_count = 0
+        
+        self.robot_state = 'IDLE'           # IDLE, PATROL, APPROACH_EXIT, APPROACH_CART
+        self.active_wp_goal_handle = None   # 순찰 취소용 핸들
+        self.cart_final_goal_pose = None    # 카트 최종 목적지 백업용
+        
+        # 🚨 [수정 필요] 로봇이 순찰할 커스텀 글로벌 경로 (X, Y) 리스트
+        self.patrol_path = [
+            (1.0, 1.0), (5.0, 1.0), (5.0, 5.0), (1.0, 5.0)
+        ]
 
-        # ==========================================================
-        # 4. 구독(Subscriber) 설정
-        # ==========================================================
-        self.docking_sub = self.create_subscription(
-            Bool, "docking_state", self.docking_callback, 10
-        )
+        # 3. 풋프린트 퍼블리셔 설정
+        self.global_footprint_pub = self.create_publisher(Polygon, "/global_costmap/footprint", 10)
+        self.local_footprint_pub = self.create_publisher(Polygon, "/local_costmap/footprint", 10)
+        self.front_global_footprint_pub = self.create_publisher(Polygon, '/front/global_costmap/footprint', 10)
+        self.front_local_footprint_pub = self.create_publisher(Polygon, '/front/local_costmap/footprint', 10)
 
-        # 리어봇(마스터) 목적지: /mission_goal
-        self.rear_goal_sub = self.create_subscription(
-            PoseStamped, "mission_goal", self.rear_goal_callback, 10
-        )
-        # 프론트봇 단독 목적지: /front/mission_goal
-        self.front_goal_sub = self.create_subscription(
-            PoseStamped, "/front/mission_goal", self.front_goal_callback, 10
-        )
+        # 4. TF2 버퍼 및 리스너 설정
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.get_logger().info(
-            "🤖 [DDS Multi-Bot Commander] 가동 완료! 메인(Rear) / 서브(Front) 통신 대기 중."
-        )
-        self.update_dual_footprints()
+        # 5. 구독(Subscriber) 설정
+        self.docking_sub = self.create_subscription(Bool, "/docking_state", self.docking_callback, 10)
+        self.cart_count_sub = self.create_subscription(UInt16, "/cart_count", self.cart_count_callback, 10)
+        self.goal_sub = self.create_subscription(PoseStamped, "/mission_goal", self.mission_goal_callback, 10)
+        self.cart_target_sub = self.create_subscription(PointStamped, "/vision/cart_target_ground", self.cart_target_callback, 10)
+        
+        # [신규] 순찰 미션 시작 트리거
+        self.mission_start_sub = self.create_subscription(Empty, "/start_patrol_mission", self.start_mission_callback, 10)
 
-    def docking_callback(self, msg):
-        previous_state = self.is_attached
+        self.get_logger().info("🤖 [Auto Commander] 실행 완료! 임무 대기 중입니다.")
+
+    # ----------------------------------------------------------
+    # 🔄 상태 업데이트 콜백 함수들
+    # ----------------------------------------------------------
+    def cart_count_callback(self, msg: UInt16):
+        self.cart_count = msg.data
+        self.get_logger().info(f"📊 카트 수 업데이트: {self.cart_count}대")
+
+    def docking_callback(self, msg: Bool):
         self.is_attached = msg.data
+        self.update_nav2_footprint()
+        is_long = self.is_attached and (self.cart_count > 0)
+        self.load_nav2_yaml_params(is_long_wheelbase=is_long)
+        mode_str = "아커만(합체) - 프론트봇 풋프린트 최소화" if self.is_attached else "디퍼런셜(분리) - 개별 풋프린트 복구"
+        self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
 
-        if self.is_attached != previous_state:
-            mode_str = (
-                "아커만 (합체, 리어봇 주도)"
-                if self.is_attached
-                else "디퍼런셜 (분리, 독립 주행)"
-            )
-            self.get_logger().info(f"🔄 [형태 변환] 모드 전환: {mode_str}")
-
-            if self.is_attached:
-                self.cancel_front_bot_goal()
-
-            self.update_dual_footprints()
-
-    def update_dual_footprints(self):
-        rear_fp_msg = Polygon()
-        front_fp_msg = Polygon()
-        width = 0.25
+    def update_nav2_footprint(self):
+        rear_width = 0.25
         rear_bumper_x = -0.3
 
         if self.is_attached:
-            # [합체] 리어봇이 프론트봇 크기까지 덮음
-            current_wheelbase = (
-                0.48 if self.cart_count == 0 else 1.55 + (self.cart_count - 1) * 0.85
-            )
-            huge_front_x = current_wheelbase + 0.3
+            current_wheelbase = 0.48 if self.cart_count == 0 else 1.30 + (self.cart_count - 1) * 0.15
+            rear_front_bumper_x = current_wheelbase + 0.3
 
-            rear_fp_msg.points = [
-                Point32(x=huge_front_x, y=-width, z=0.0),
-                Point32(x=huge_front_x, y=width, z=0.0),
-                Point32(x=rear_bumper_x, y=width, z=0.0),
-                Point32(x=rear_bumper_x, y=-width, z=0.0),
-            ]
-            # 프론트봇은 점(Point) 처리하여 잉여 연산 방지
-            front_fp_msg.points = [
-                Point32(x=0.01, y=-0.01, z=0.0),
-                Point32(x=0.01, y=0.01, z=0.0),
-                Point32(x=-0.01, y=0.01, z=0.0),
-                Point32(x=-0.01, y=-0.01, z=0.0),
-            ]
+            rear_msg = self._create_polygon(rear_front_bumper_x, rear_bumper_x, rear_width)
+            tiny_size = 0.01
+            front_msg = self._create_polygon(tiny_size, -tiny_size, tiny_size)
         else:
-            # [분리] 각자 크기 복구
-            small_front_x = 0.3
-            rear_fp_msg.points = [
-                Point32(x=small_front_x, y=-width, z=0.0),
-                Point32(x=small_front_x, y=width, z=0.0),
-                Point32(x=rear_bumper_x, y=width, z=0.0),
-                Point32(x=rear_bumper_x, y=-width, z=0.0),
-            ]
-            front_fp_msg.points = rear_fp_msg.points
+            rear_msg = self._create_polygon(0.3, rear_bumper_x, rear_width)
+            front_msg = self._create_polygon(0.3, -0.3, 0.25)
 
-        self.rear_global_fp_pub.publish(rear_fp_msg)
-        self.rear_local_fp_pub.publish(rear_fp_msg)
-        self.front_global_fp_pub.publish(front_fp_msg)
-        self.front_local_fp_pub.publish(front_fp_msg)
-        self.get_logger().info("📐 풋프린트 동기화 완료.")
+        self.global_footprint_pub.publish(rear_msg)
+        self.local_footprint_pub.publish(rear_msg)
+        self.front_global_footprint_pub.publish(front_msg)
+        self.front_local_footprint_pub.publish(front_msg)
 
-    def rear_goal_callback(self, msg: PoseStamped):
-        self.get_logger().info(f"📥 [Rear/Ackermann] 명령 수신")
-        if not self.rear_nav_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("Rear Nav2 서버 다운!")
+    # ----------------------------------------------------------
+    # 🏁 미션 제어 (순찰 시작 및 일반 목표 수신)
+    # ----------------------------------------------------------
+    def start_mission_callback(self, msg: Empty):
+        """순찰 미션 시작 트리거"""
+        if self.robot_state != 'IDLE':
+            self.get_logger().warn("⚠️ 현재 다른 주행 임무를 수행 중입니다. 순찰 명령 무시.")
+            return
+
+        self.get_logger().info("🚀 [미션 가동] 글로벌 경로(Waypoint) 순찰 주행을 시작합니다!")
+        self.robot_state = 'PATROL'
+
+        waypoints = []
+        for i, (x, y) in enumerate(self.patrol_path):
+            pose = PoseStamped()
+            pose.header.frame_id = 'map'
+            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
+
+            # 다음 점을 바라보도록 각도 계산
+            if i < len(self.patrol_path) - 1:
+                next_x, next_y = self.patrol_path[i+1]
+                yaw = math.atan2(next_y - y, next_x - x)
+                pose.pose.orientation.z = math.sin(yaw / 2.0)
+                pose.pose.orientation.w = math.cos(yaw / 2.0)
+            else:
+                pose.pose.orientation.w = 1.0
+            waypoints.append(pose)
+
+        goal_msg = FollowWaypoints.Goal()
+        goal_msg.poses = waypoints
+
+        self.send_wp_future = self.wp_client.send_goal_async(goal_msg)
+        self.send_wp_future.add_done_callback(self.wp_goal_response_callback)
+
+    def mission_goal_callback(self, msg: PoseStamped):
+        """단일 일반 목표 수신 시 (수동 제어 등)"""
+        self.get_logger().info(f"📥 일반 목적지 수신: X={msg.pose.position.x:.2f}, Y={msg.pose.position.y:.2f}")
+        
+        # 진행 중인 임무 강제 초기화 및 새로운 단일 주행 실행
+        if self.active_wp_goal_handle:
+            self.active_wp_goal_handle.cancel_goal_async()
+            self.active_wp_goal_handle = None
+            
+        self.robot_state = 'IDLE' 
+        self._send_nav_goal(msg)
+
+    # ----------------------------------------------------------
+    # 🛒 카트 타겟 수신 및 이탈점 계산 콜백
+    # ----------------------------------------------------------
+    def cart_target_callback(self, msg: PointStamped):
+        """카트 발견 시 호출되어 이탈점 계산 후 궤도 수정"""
+        # 순찰(PATROL) 상태가 아니면 비전 데이터 무시 (중복 실행 방지)
+        if self.robot_state != 'PATROL':
+            return
+
+        current_time = self.get_clock().now()
+        cart_x, cart_y = msg.point.x, msg.point.y
+        distance_to_cart = math.hypot(cart_x, cart_y)
+        yaw_to_cart = math.atan2(cart_y, cart_x)
+
+        # 안전 정지 거리 확보
+        stop_distance = 1.5 if self.is_attached else 1.0
+        if distance_to_cart <= stop_distance:
+            return
+
+        ratio = (distance_to_cart - stop_distance) / distance_to_cart
+        local_goal_x = cart_x * ratio
+        local_goal_y = cart_y * ratio
+
+        # 1. 로컬 좌표를 Map(글로벌) 좌표계로 변환
+        local_pose = PoseStamped()
+        local_pose.header.frame_id = msg.header.frame_id
+        local_pose.header.stamp = current_time.to_msg()
+        local_pose.pose.position.x = local_goal_x
+        local_pose.pose.position.y = local_goal_y
+        local_pose.pose.orientation.z = math.sin(yaw_to_cart / 2.0)
+        local_pose.pose.orientation.w = math.cos(yaw_to_cart / 2.0)
+
+        try:
+            transform = self.tf_buffer.lookup_transform('map', msg.header.frame_id, rclpy.time.Time())
+            global_goal_pose = tf2_geometry_msgs.do_transform_pose(local_pose.pose, transform)
+
+            target_global_x = global_goal_pose.pose.position.x
+            target_global_y = global_goal_pose.pose.position.y
+
+            self.get_logger().info(f"👀 카트 발견! (글로벌 좌표 X={target_global_x:.2f}, Y={target_global_y:.2f})")
+
+            # 2. 이탈점(Exit Point) 계산
+            exit_x, exit_y = self.get_closest_point_on_path(target_global_x, target_global_y)
+
+            # 3. 진행 중이던 글로벌 순찰(Waypoint) 즉시 중지
+            if self.active_wp_goal_handle is not None:
+                self.get_logger().info("🛑 기존 순찰 경로 주행을 중지하고 궤도 이탈을 시작합니다.")
+                self.active_wp_goal_handle.cancel_goal_async()
+                self.active_wp_goal_handle = None
+
+            # 4. 상태 변경 및 카트 목적지 백업
+            self.robot_state = 'APPROACH_EXIT'
+            
+            final_pose = PoseStamped()
+            final_pose.header.frame_id = 'map'
+            final_pose.header.stamp = current_time.to_msg()
+            final_pose.pose = global_goal_pose.pose
+            self.cart_final_goal_pose = final_pose
+
+            # 5. 이탈점으로 주행 명령 하달 (이탈점에서 카트를 바라보게 방향 설정)
+            exit_pose = PoseStamped()
+            exit_pose.header.frame_id = 'map'
+            exit_pose.header.stamp = current_time.to_msg()
+            exit_pose.pose.position.x = exit_x
+            exit_pose.pose.position.y = exit_y
+            
+            exit_yaw = math.atan2(target_global_y - exit_y, target_global_x - exit_x)
+            exit_pose.pose.orientation.z = math.sin(exit_yaw / 2.0)
+            exit_pose.pose.orientation.w = math.cos(exit_yaw / 2.0)
+
+            self.get_logger().info(f"📍 가장 가까운 안전 이탈점(X={exit_x:.2f}, Y={exit_y:.2f})으로 이동합니다.")
+            self._send_nav_goal(exit_pose)
+
+        except tf2_ros.TransformException as ex:
+            self.get_logger().warning(f"TF 변환 실패(로컬라이제이션 대기 중): {ex}")
+
+    def get_closest_point_on_path(self, target_x, target_y):
+        """경로 리스트를 순회하며 타겟(카트)과 가장 가까운 선분 상의 수선의 발을 찾음"""
+        min_dist = float('inf')
+        exit_point = (0.0, 0.0)
+
+        for i in range(len(self.patrol_path) - 1):
+            ax, ay = self.patrol_path[i]
+            bx, by = self.patrol_path[i+1]
+
+            ab_dx, ab_dy = bx - ax, by - ay
+            ab_len_sq = ab_dx**2 + ab_dy**2
+
+            if ab_len_sq == 0: continue
+
+            # 선분 위에서의 비율 t 한정 (0 ~ 1)
+            t = max(0, min(1, ((target_x - ax) * ab_dx + (target_y - ay) * ab_dy) / ab_len_sq))
+            
+            closest_x = ax + t * ab_dx
+            closest_y = ay + t * ab_dy
+
+            dist = math.hypot(target_x - closest_x, target_y - closest_y)
+            
+            if dist < min_dist:
+                min_dist = dist
+                exit_point = (closest_x, closest_y)
+
+        return exit_point
+
+    # ----------------------------------------------------------
+    # 🎯 Nav2 주행 전송 및 체이닝 콜백 함수들
+    # ----------------------------------------------------------
+    def _send_nav_goal(self, msg: PoseStamped):
+        """단일 주행명령 전송 내부 함수"""
+        if not self.nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Nav2 서버가 응답하지 않습니다!")
             return
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = msg
-        goal_msg.behavior_tree = (
-            self.ackermann_bt_path if self.is_attached else self.diff_bt_path
-        )
-        self.rear_nav_client.send_goal_async(goal_msg)
+        goal_msg.behavior_tree = self.ackermann_bt_path if self.is_attached else self.diff_bt_path
 
-    def front_goal_callback(self, msg: PoseStamped):
-        if self.is_attached:
-            self.get_logger().warn("⚠️ [Front Bot] 합체 상태! 단독 주행 명령 무시.")
+        self.send_goal_future = self.nav_client.send_goal_async(goal_msg)
+        self.send_goal_future.add_done_callback(self.nav_goal_response_callback)
+
+    def nav_goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Nav2가 주행을 거부했습니다.")
             return
+        
+        self._get_result_future = goal_handle.get_result_async()
+        self._get_result_future.add_done_callback(self.nav_result_callback)
 
-        self.get_logger().info(f"📥 [Front Bot] 독립 명령 수신")
-        if not self.front_nav_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("Front Nav2 서버 다운!")
+    def nav_result_callback(self, future):
+        """단일 주행 완료에 따른 상태별 체이닝(연속 실행) 처리"""
+        if self.robot_state == 'APPROACH_EXIT':
+            self.get_logger().info("✅ 이탈점(Exit Point) 도착 완료! 안전 구역을 벗어나 카트로 직진합니다.")
+            self.robot_state = 'APPROACH_CART'
+            self._send_nav_goal(self.cart_final_goal_pose)
+            
+        elif self.robot_state == 'APPROACH_CART':
+            self.get_logger().info("🎯 카트 정면 도착 완료! 도킹 대기 모드로 전환합니다.")
+            self.robot_state = 'IDLE'
+            
+        else:
+            self.get_logger().info("✅ 일반 목적지에 무사히 도착했습니다!")
+            self.robot_state = 'IDLE'
+
+    # --- Waypoint 액션 콜백 ---
+    def wp_goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Nav2가 순찰(Waypoint)을 거부했습니다.")
+            self.robot_state = 'IDLE'
             return
+        self.active_wp_goal_handle = goal_handle
+        self._get_wp_result_future = goal_handle.get_result_async()
+        self._get_wp_result_future.add_done_callback(self.wp_result_callback)
 
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose = msg
-        goal_msg.behavior_tree = self.diff_bt_path
-        self.front_nav_client.send_goal_async(goal_msg)
+    def wp_result_callback(self, future):
+        # 도중에 취소되지 않고 순찰을 끝까지 마쳤을 때만 처리
+        if self.robot_state == 'PATROL':
+            self.get_logger().info("🏁 모든 순찰 경로를 탐색 완료했습니다.")
+            self.robot_state = 'IDLE'
+            self.active_wp_goal_handle = None
 
-    def cancel_front_bot_goal(self):
-        self.get_logger().info("🛑 프론트봇 독립 주행 강제 정지 명령 전송 (구현 필요)")
+    # ----------------------------------------------------------
+    # 🛠️ 내부 헬퍼 메서드 (YAML 파라미터 로딩 및 풋프린트 생성용) - (기존 유지)
+    # ----------------------------------------------------------
+    def load_nav2_yaml_params(self, is_long_wheelbase):
+        yaml_path = "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml" if is_long_wheelbase else "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
+        if not os.path.exists(yaml_path): return
+
+        with open(yaml_path, 'r') as file:
+            try: yaml_data = yaml.safe_load(file)
+            except yaml.YAMLError as exc: return
+
+        node_target_map = {
+            'controller_server': '/controller_server', 'planner_server': '/planner_server',
+            'local_costmap': '/local_costmap/local_costmap', 'global_costmap': '/global_costmap/global_costmap',
+            'velocity_smoother': '/velocity_smoother'
+        }
+
+        for yaml_key, node_name in node_target_map.items():
+            if yaml_key in yaml_data and 'ros__parameters' in yaml_data[yaml_key]:
+                flat_params = self._flatten_dict(yaml_data[yaml_key]['ros__parameters'])
+                self._send_parameters_to_node(node_name, flat_params)
+
+    def _flatten_dict(self, d, parent_key='', sep='.'):
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict): items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+            else: items.append((new_key, v))
+        return dict(items)
+
+    def _send_parameters_to_node(self, node_name, flat_params):
+        client = self.create_client(SetParameters, f"{node_name}/set_parameters")
+        if not client.wait_for_service(timeout_sec=1.0): return
+
+        request = SetParameters.Request()
+        for name, value in flat_params.items():
+            try: request.parameters.append(Parameter(name, value=value).to_parameter_msg())
+            except Exception: pass
+
+        future = client.call_async(request)
+        future.add_done_callback(lambda fut: self._parameter_set_callback(fut, node_name))
+
+    def _parameter_set_callback(self, future: Future, node_name: str):
+        try: future.result()
+        except Exception: pass
+
+    def _create_polygon(self, front_x, rear_x, width) -> Polygon:
+        poly = Polygon()
+        poly.points = [
+            Point32(x=float(front_x), y=float(-width), z=0.0), Point32(x=float(front_x), y=float(width), z=0.0),
+            Point32(x=float(rear_x), y=float(width), z=0.0), Point32(x=float(rear_x), y=float(-width), z=0.0),
+        ]
+        return poly
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MultiBotCommander()
+    node = AutoNavCommander()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
