@@ -9,7 +9,7 @@ def generate_launch_description():
     cap_sim_dir = get_package_share_directory('cap_sim_2026')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
 
-    params_file = os.path.join(cap_sim_dir, 'config', 'nav2_real_acman_params_noncart.yaml') 
+    params_file = os.path.join(cap_sim_dir, 'config', 'nav2_real_acman_params_combine.yaml') 
     map_file = '/home/baek/colcon_ws/src/cap_sim_2026/maps/320.yaml' 
     rviz_config_file = os.path.join(cap_sim_dir, 'rviz', 'my.rviz')
 

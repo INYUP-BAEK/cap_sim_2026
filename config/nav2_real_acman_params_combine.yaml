@@ -180,11 +180,102 @@ controller_server:
         threshold_to_consider: 0.5
         max_angle_to_prefer: 0.785
 
+    # ==========================================================
+    # ✂️ 3. 카트 2개 합체 모드 : 아커만 주행 (1.45m 휠베이스 최적화)
+    # ==========================================================
+    FollowPathAckermann_cart2:
+      plugin: "nav2_mppi_controller::MPPIController"
+
+      # 6.4초의 시야 유지 (무거운 카트의 제동/조향 타이밍 확보)
+      time_steps: 70
+      model_dt: 0.07
+      batch_size: 1500
+      vx_std: 0.08
+      vy_std: 0.0
+      wz_std: 0.25
+      vx_max: 0.18
+      vx_min: -0.1
+      vy_max: 0.0
+      vy_min: 0.0
+      wz_max: 0.55
+      wz_min: -0.55
+      iteration_count: 1
+      prune_distance: 1.2
+      transform_tolerance: 0.5
+      temperature: 0.35
+      gamma: 0.02
+      motion_model: "Ackermann"
+      visualize: false
+
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+
+      AckermannConstraints:
+        min_turning_r: 0.90
+
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+
+      # 🚨 [최적화] 인플레이션이 걸려있던 크리틱 가중치를 모두 정규화
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 8.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+        threshold_to_consider: 1.6
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        threshold_to_consider: 0.7
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 1.5
+        threshold_to_consider: 2.0
+      ObstaclesCritic:
+        enabled: true
+        cost_power: 1
+        repulsion_weight: 4.0
+        critical_weight: 25.0
+        consider_footprint: true
+        collision_cost: 10000.0
+        collision_margin_distance: 0.25
+        near_goal_distance: 0.7
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+        max_heuristic_delay: 0.1
+        trajectory_point_step: 2
+        threshold_to_consider: 0.5
+        offset_from_furthest: 8
+        max_path_occupancy_ratio: 0.1
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 10.0
+        offset_from_furthest: 3
+        threshold_to_consider: 1.2
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 3
+        threshold_to_consider: 0.5
+        max_angle_to_prefer: 0.785
+        max_angle_to_furthest: 1.2
+
+
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       # [최적화] 짧은 로봇 길이에 맞춰 정밀 타격 (10cm 오차 허용)
-      xy_goal_tolerance: 0.10  
+      xy_goal_tolerance: 0.20  
       yaw_goal_tolerance: 0.5  
       
     progress_checker:
@@ -196,7 +287,7 @@ planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
     use_sim_time: false
-    planner_plugins: ["PlannerAckermann", "PlannerDiff"]
+    planner_plugins: ["PlannerAckermann", "PlannerDiff", "PlannerAckermann_cart2"]
 
     PlannerAckermann:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
@@ -221,6 +312,20 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
       use_boundary_cost: true
+
+    PlannerAckermann_cart2:
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      tolerance: 0.5
+      downsample_costmap: false
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      motion_model_for_search: "REEDS_SHEPP"
+
+      minimum_turning_radius: 0.9
+      reverse_penalty: 4.0
+      change_penalty: 1.0
 
 local_costmap:
   local_costmap: 
@@ -403,6 +508,9 @@ velocity_smoother:
     
     max_accel: [0.3, 0.0, 0.8]   
     max_decel: [-0.5, 0.0, -1.0]
+
+    smoothing_frequency: 20.0
+    feedback: OPEN_LOOP
 
 smoother_server:
   ros__parameters:

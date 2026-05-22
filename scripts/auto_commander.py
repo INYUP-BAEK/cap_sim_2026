@@ -2,7 +2,6 @@
 
 import os
 import math
-import yaml
 
 import rclpy
 from rclpy.node import Node
@@ -24,16 +23,18 @@ class AutoNavCommander(Node):
     def __init__(self):
         super().__init__("auto_nav_commander")
 
-        # 1. Nav2 액션 클라이언트 및 BT XML 경로 설정
+        # 1. Nav2 액션 클라이언트 및 BT XML 3가지 경로 설정
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         pkg_dir = get_package_share_directory("cap_sim_2026")
+        
         self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
         self.ackermann_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_nav_tree.xml")
+        self.ackermann_cart2_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_cart2_nav_tree.xml")
 
         # 2. 로봇의 현재 상태 관리 변수
         self.is_attached = True
         self.cart_count = 0
-        self.last_cart_goal_time = None  # 0.5초 쿨다운 관리용
+        self.last_cart_goal_time = None
 
         # 3. 풋프린트 퍼블리셔 설정
         self.global_footprint_pub = self.create_publisher(Polygon, "/global_costmap/footprint", 10)
@@ -57,40 +58,83 @@ class AutoNavCommander(Node):
     # 🔄 상태 업데이트 콜백 함수들
     # ----------------------------------------------------------
     def cart_count_callback(self, msg: UInt16):
-        self.cart_count = msg.data
-        self.get_logger().info(f"📊 카트 수 업데이트: {self.cart_count}대")
+        if self.cart_count != msg.data:
+            self.cart_count = msg.data
+            self.get_logger().info(f"📊 카트 수 업데이트: {self.cart_count}대")
+            self.update_dynamic_state()
 
     def docking_callback(self, msg: Bool):
-        self.is_attached = msg.data
+        if self.is_attached != msg.data:
+            self.is_attached = msg.data
+            self.get_logger().info(f"🔗 결합 상태 업데이트: {self.is_attached}")
+            self.update_dynamic_state()
 
+    def update_dynamic_state(self):
+        """상태가 변할 때 풋프린트 토픽을 쏘고, 카메라 레이어 및 스무더 파라미터만 가볍게 변경합니다."""
         # 1. 동적 풋프린트 실시간 퍼블리시
         self.update_nav2_footprint()
 
-        # 2. 결합 상태에 맞춰 YAML 파라미터 파일 스위칭
-        is_long = self.is_attached and (self.cart_count > 0)
-        self.load_nav2_yaml_params(is_long_wheelbase=is_long)
+        # 2. YAML 파일을 통째로 읽는 대신, 필요한 파라미터만 직접 딕셔너리로 쏴줍니다.
+        if self.is_attached:
+            if self.cart_count >= 1:
+                # 🚛 [합체 - 카트 2개 이상] 무겁고 둔함
+                smoother_params = {
+                    'max_velocity': [0.18, 0.0, 0.55],
+                    'min_velocity': [-0.1, 0.0, -0.55],
+                    'max_accel': [0.12, 0.0, 0.25],
+                    'max_decel': [-0.15, 0.0, -0.3]
+                }
+                mode_str = f"아커만(카트 {self.cart_count}대) - 프론트 카메라 활성화"
+            else:
+                # 🏎️ [합체 - 직결] 가볍고 빠름
+                smoother_params = {
+                    'max_velocity': [0.25, 0.0, 0.7],
+                    'min_velocity': [-0.15, 0.0, -0.7],
+                    'max_accel': [0.3, 0.0, 0.8],
+                    'max_decel': [-0.5, 0.0, -1.0]
+                }
+                mode_str = "아커만(직결) - 프론트 카메라 활성화"
+            
+            # 합체 모드 공통: 시야가 가려진 리어 카메라는 끄고 프론트 카메라를 켭니다.
+            camera_params = {
+                'stvl_camera_rear_layer.enabled': False,
+                'stvl_camera_front_layer.enabled': True
+            }
+        else:
+            # ✂️ [분리 - 디퍼런셜]
+            smoother_params = {
+                'max_velocity': [0.35, 0.0, 1.0],
+                'min_velocity': [-0.35, 0.0, -1.0],
+                'max_accel': [0.5, 0.0, 1.5],
+                'max_decel': [-0.5, 0.0, -1.5]
+            }
+            # 분리 모드: 자체 리어 카메라는 켜고, 프론트 카메라는 끕니다.
+            camera_params = {
+                'stvl_camera_rear_layer.enabled': True,
+                'stvl_camera_front_layer.enabled': False
+            }
+            mode_str = "디퍼런셜(분리) - 리어 카메라 활성화"
 
-        mode_str = "아커만(합체) - 프론트봇 풋프린트 최소화" if self.is_attached else "디퍼런셜(분리) - 개별 풋프린트 복구"
-        self.get_logger().info(f"🔄 [상태 변경 감지] 현재 모드: {mode_str}")
+        # 코스트맵과 벨로시티 스무더에 파라미터 직접 전송
+        # self._send_parameters_to_node('/local_costmap/local_costmap', camera_params)
+        # self._send_parameters_to_node('/global_costmap/global_costmap', camera_params)
+        self._send_parameters_to_node('/velocity_smoother', smoother_params)
+
+        self.get_logger().info(f"🔄 [다이내믹 업데이트 완료] {mode_str}")
 
     def update_nav2_footprint(self):
-        """현재 상태에 맞춰 풋프린트를 계산하고 발행합니다."""
+        """현재 상태에 맞춰 풋프린트 토픽을 발행합니다."""
         rear_width = 0.25
         rear_bumper_x = -0.3
 
         if self.is_attached:
-            current_wheelbase = (
-                0.48 if self.cart_count == 0 else 1.30 + (self.cart_count - 1) * 0.15
-            )
+            current_wheelbase = 0.48 if self.cart_count == 0 else 1.30 + (self.cart_count - 1) * 0.15
             rear_front_bumper_x = current_wheelbase + 0.3
 
-            # 결합 상태: 리어봇은 길게, 프론트봇은 점(더미) 처리
             rear_msg = self._create_polygon(rear_front_bumper_x, rear_bumper_x, rear_width)
-
             tiny_size = 0.01
             front_msg = self._create_polygon(tiny_size, -tiny_size, tiny_size)
         else:
-            # 분리 상태: 각각의 고유 풋프린트 사용
             rear_msg = self._create_polygon(0.3, rear_bumper_x, rear_width)
             front_msg = self._create_polygon(0.3, -0.3, 0.25)
 
@@ -99,13 +143,54 @@ class AutoNavCommander(Node):
         self.front_global_footprint_pub.publish(front_msg)
         self.front_local_footprint_pub.publish(front_msg)
 
+
+    # ----------------------------------------------------------
+    # 🎯 목적지 수신 및 Nav2 자동 실행 콜백 함수 (BT 스위칭)
+    # ----------------------------------------------------------
+    def mission_goal_callback(self, msg: PoseStamped):
+        self.get_logger().info(f"📥 새로운 목적지 수신: X={msg.pose.position.x:.2f}, Y={msg.pose.position.y:.2f}")
+
+        if not self.nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("Nav2 서버가 응답하지 않습니다!")
+            return
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = msg
+
+        # 🚨 [BT 스위칭 핵심 로직] 상태와 카트 개수에 맞춰 트리를 고릅니다.
+        if not self.is_attached:
+            goal_msg.behavior_tree = self.diff_bt_path
+            self.get_logger().info("✂️ [자동 선택] 디퍼런셜 트리를 사용합니다.")
+        elif self.cart_count >= 1:
+            goal_msg.behavior_tree = self.ackermann_cart2_bt_path
+            self.get_logger().info("🚛 [자동 선택] 아커만(카트 2개) 트리를 사용합니다.")
+        else:
+            goal_msg.behavior_tree = self.ackermann_bt_path
+            self.get_logger().info("🏎️ [자동 선택] 아커만(직결/기본) 트리를 사용합니다.")
+
+        self.send_goal_future = self.nav_client.send_goal_async(goal_msg)
+        self.send_goal_future.add_done_callback(self.goal_response_callback)
+
+    def goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Nav2가 주행을 거부했습니다.")
+            return
+
+        self.get_logger().info("🚀 Nav2 자율주행 시작!")
+        self._get_result_future = goal_handle.get_result_async()
+        self._get_result_future.add_done_callback(self.get_result_callback)
+
+    def get_result_callback(self, future):
+        self.get_logger().info("✅ 목적지에 무사히 도착했습니다!")
+
+
     # ----------------------------------------------------------
     # 🛒 카트 타겟 수신 및 좌표 변환 콜백 함수
     # ----------------------------------------------------------
     def cart_target_callback(self, msg: PointStamped):
         current_time = self.get_clock().now()
 
-        # 쿨다운 체크 (0.5초 이내 중복 호출 방지)
         if self.last_cart_goal_time is not None:
             if (current_time - self.last_cart_goal_time).nanoseconds < 5e8:
                 return
@@ -141,9 +226,7 @@ class AutoNavCommander(Node):
             global_goal_pose.header.stamp = current_time.to_msg()
             global_goal_pose.pose = transformed_pose
 
-            self.get_logger().info(
-                f"🛒 [시선 일치] 카트 앞 목표 좌표: X={global_goal_pose.pose.position.x:.2f}, Y={global_goal_pose.pose.position.y:.2f}"
-            )
+            self.get_logger().info(f"🛒 [시선 일치] 카트 앞 목표 좌표: X={global_goal_pose.pose.position.x:.2f}")
 
             self.mission_goal_callback(global_goal_pose)
             self.last_cart_goal_time = current_time
@@ -151,147 +234,39 @@ class AutoNavCommander(Node):
         except tf2_ros.TransformException as ex:
             self.get_logger().warning(f"로컬라이제이션 대기 중 또는 TF 변환 실패: {ex}")
 
-    # ----------------------------------------------------------
-    # 🎯 목적지 수신 및 Nav2 자동 실행 콜백 함수
-    # ----------------------------------------------------------
-    def mission_goal_callback(self, msg: PoseStamped):
-        self.get_logger().info(f"📥 새로운 목적지 수신: X={msg.pose.position.x:.2f}, Y={msg.pose.position.y:.2f}")
-
-        if not self.nav_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("Nav2 서버가 응답하지 않습니다!")
-            return
-
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose = msg
-
-        if self.is_attached:
-            goal_msg.behavior_tree = self.ackermann_bt_path
-            self.get_logger().info("🚂 [자동 선택] 아커만 트리를 사용하여 주행을 시작합니다.")
-        else:
-            goal_msg.behavior_tree = self.diff_bt_path
-            self.get_logger().info("✂️ [자동 선택] 디퍼런셜 트리를 사용하여 주행을 시작합니다.")
-
-        self.send_goal_future = self.nav_client.send_goal_async(goal_msg)
-        self.send_goal_future.add_done_callback(self.goal_response_callback)
-
-    def goal_response_callback(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error("Nav2가 주행을 거부했습니다.")
-            return
-
-        self.get_logger().info("🚀 Nav2 자율주행 시작!")
-        self._get_result_future = goal_handle.get_result_async()
-        self._get_result_future.add_done_callback(self.get_result_callback)
-
-    def get_result_callback(self, future):
-        self.get_logger().info("✅ 목적지에 무사히 도착했습니다!")
 
     # ----------------------------------------------------------
-    # 🛠️ 내부 헬퍼 메서드 (YAML 파라미터 로딩 및 풋프린트 생성용)
+    # 🛠️ 내부 헬퍼 메서드 (직접 파라미터 전송 통신용)
     # ----------------------------------------------------------
-    # ----------------------------------------------------------
-    # 🛠️ 내부 헬퍼 메서드 (YAML 파라미터 로딩 및 풋프린트 생성용)
-    # ----------------------------------------------------------
-    def load_nav2_yaml_params(self, is_long_wheelbase):
-        yaml_path = (
-            "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params.yaml"
-            if is_long_wheelbase
-            else "/home/baek/colcon_ws/src/cap_sim_2026/config/nav2_real_acman_params_noncart.yaml"
-        )
-        mode = "카트 결합 모드(1.45m)" if is_long_wheelbase else "직결 모드(0.48m)"
-        self.get_logger().info(f"🚛 [파라미터 체인지] {mode} YAML 적용 중...")
-
-        if not os.path.exists(yaml_path):
-            self.get_logger().error(f"❌ YAML 파일을 찾을 수 없습니다: {yaml_path}")
-            return
-
-        with open(yaml_path, "r") as file:
-            try:
-                yaml_data = yaml.safe_load(file)
-            except yaml.YAMLError as exc:
-                self.get_logger().error(f"❌ YAML 파싱 에러: {exc}")
-                return
-
-        node_target_map = {
-            "controller_server": "/controller_server",
-            "planner_server": "/planner_server",
-            "local_costmap": "/local_costmap/local_costmap",
-            "global_costmap": "/global_costmap/global_costmap",
-            "velocity_smoother": "/velocity_smoother",
-        }
-
-        for yaml_key, node_name in node_target_map.items():
-            if yaml_key not in yaml_data:
-                continue
-
-            target_data = yaml_data[yaml_key]
-
-            # [수정 1] costmap 노드의 이중 계층 구조(depth) 파싱 처리
-            if yaml_key in target_data:
-                target_data = target_data[yaml_key]
-
-            if "ros__parameters" in target_data:
-                flat_params = self._flatten_dict(target_data["ros__parameters"])
-                self._send_parameters_to_node(node_name, flat_params)
-            else:
-                self.get_logger().warn(
-                    f"⚠️ {yaml_key} 파라미터를 YAML에서 찾을 수 없습니다."
-                )
-
-    def _flatten_dict(self, d, parent_key="", sep="."):
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        return dict(items)
-
-    def _send_parameters_to_node(self, node_name, flat_params):
+    def _send_parameters_to_node(self, node_name, param_dict):
         client = self.create_client(SetParameters, f"{node_name}/set_parameters")
 
-        # [수정 2] Timeout 시간 증가 (Nav2 노드 응답 지연 대비)
-        if not client.wait_for_service(timeout_sec=3.0):
-            self.get_logger().error(
-                f"❌ {node_name} 서비스 연결 실패. 노드가 죽었거나 연결 지연 중입니다."
-            )
+        if not client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn(f"⚠️ {node_name} 서비스 연결 지연 중.")
             return
 
         request = SetParameters.Request()
-        for name, value in flat_params.items():
-            # 🚨 [수정됨] 리스트 형태(플러그인) 차단 + 'footprint' 파라미터 전송 차단
-            # footprint는 오직 Topic으로만 제어하기 위해 YAML 파라미터 업데이트에서 제외합니다.
-            if isinstance(value, list) or name == 'footprint':
-                continue
-                
+        for name, value in param_dict.items():
             try:
                 request.parameters.append(Parameter(name, value=value).to_parameter_msg())
             except Exception as e:
-                self.get_logger().error(f"❌ 파라미터 변환 실패 ({name}: {value}): {e}")
+                self.get_logger().error(f"❌ 파라미터 변환 실패 ({name}): {e}")
+                
         future = client.call_async(request)
-
-        # [수정 4] 파이썬 람다 클로저(Closure) 버그 수정 -> 각 노드 이름이 정상적으로 로그에 찍힘
-        future.add_done_callback(
-            lambda fut, n=node_name: self._parameter_set_callback(fut, n)
-        )
+        future.add_done_callback(lambda fut, n=node_name: self._parameter_set_callback(fut, n))
 
     def _parameter_set_callback(self, future: Future, node_name: str):
         try:
             response = future.result()
             failed = [res.reason for res in response.results if not res.successful]
             if failed:
-                self.get_logger().warn(
-                    f"⚠️ {node_name} 일부 파라미터 업데이트 거부됨: {failed}"
-                )
+                self.get_logger().warn(f"⚠️ {node_name} 파라미터 업데이트 거부됨: {failed}")
             else:
-                self.get_logger().info(f"✅ {node_name} 파라미터 실시간 업데이트 완료!")
+                self.get_logger().info(f"✅ {node_name} 파라미터 실시간 적용 완료!")
         except Exception as e:
-            self.get_logger().error(f"❌ {node_name} 업데이트 예외 발생: {e}")
+            self.get_logger().error(f"❌ {node_name} 통신 에러 발생: {e}")
 
     def _create_polygon(self, front_x, rear_x, width) -> Polygon:
-        """반복되는 풋프린트(다각형) 생성을 처리하는 헬퍼 메서드"""
         poly = Polygon()
         poly.points = [
             Point32(x=float(front_x), y=float(-width), z=0.0),
