@@ -30,7 +30,7 @@ class AutoNavCommander(Node):
         pkg_dir = get_package_share_directory("cap_sim_2026")
         self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
         self.ackermann_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_nav_tree.xml")
-        self.ackermann_cart2_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_cart2_nav_tree.xml") # 🆕 추가됨
+        self.ackermann_cart2_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_cart2_nav_tree.xml")
 
         # 2. 로봇 상태 및 주행 관리 변수 (State Machine)
         self.is_attached = True
@@ -42,8 +42,8 @@ class AutoNavCommander(Node):
         
         # 🚨 [수정 필요] 로봇이 순찰할 커스텀 글로벌 경로 (X, Y) 리스트
         self.patrol_path = [
-            (1.0, 1.0), (5.0, 1.0), (5.0, 5.0), (1.0, 5.0)
-        ]
+            (6.82, 2.5), (7.72, 2.45), (4.52, 1.95), (4.67, 1.1)]
+
 
         # 3. 풋프린트 퍼블리셔 설정
         self.global_footprint_pub = self.create_publisher(Polygon, "/global_costmap/footprint", 10)
@@ -67,7 +67,7 @@ class AutoNavCommander(Node):
         self.get_logger().info("🤖 [Scenario Runner] 실행 완료! 임무 대기 중입니다.")
 
     # ----------------------------------------------------------
-    # 🔄 상태 업데이트 콜백 함수들
+    # 🔄 상태 업데이트 콜백 함수
     # ----------------------------------------------------------
     def cart_count_callback(self, msg: UInt16):
         if self.cart_count != msg.data:
@@ -126,7 +126,6 @@ class AutoNavCommander(Node):
             mode_str = "디퍼런셜(분리) - 리어 카메라 활성화"
 
         # 코스트맵과 벨로시티 스무더에 파라미터 실시간 전송
-        # (테스트 편의를 위해 주석 처리하신 경우 그대로 유지하셔도 됩니다)
         # self._send_parameters_to_node('/local_costmap/local_costmap', camera_params)
         # self._send_parameters_to_node('/global_costmap/global_costmap', camera_params)
         self._send_parameters_to_node('/velocity_smoother', smoother_params)
