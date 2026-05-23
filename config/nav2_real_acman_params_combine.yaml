@@ -70,11 +70,11 @@ controller_server:
       ObstaclesCritic:
         enabled: true
         cost_power: 1
-        repulsion_weight: 5.0          
-        critical_weight: 20.0
+        repulsion_weight: 10.0          
+        critical_weight: 40.0
         consider_footprint: true       
         collision_cost: 10000.0        
-        collision_margin_distance: 0.20 
+        collision_margin_distance: 0.35 
         near_goal_distance: 0.5
       PathAlignCritic:
         enabled: true
@@ -239,16 +239,16 @@ controller_server:
       ObstaclesCritic:
         enabled: true
         cost_power: 1
-        repulsion_weight: 4.0
-        critical_weight: 25.0
-        consider_footprint: true
-        collision_cost: 10000.0
-        collision_margin_distance: 0.25
+        repulsion_weight: 10.0          
+        critical_weight: 40.0
+        consider_footprint: true       
+        collision_cost: 10000.0        
+        collision_margin_distance: 0.35 
         near_goal_distance: 0.7
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 10.0
+        cost_weight: 18.0
         max_heuristic_delay: 0.1
         trajectory_point_step: 2
         threshold_to_consider: 0.5
@@ -258,13 +258,13 @@ controller_server:
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 10.0
+        cost_weight: 12.0
         offset_from_furthest: 3
         threshold_to_consider: 1.2
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        cost_weight: 10.0
         offset_from_furthest: 3
         threshold_to_consider: 0.5
         max_angle_to_prefer: 0.785
@@ -399,8 +399,8 @@ local_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+        cost_scaling_factor: 1.0
+        inflation_radius: 1.0
 
 global_costmap:
   global_costmap:
@@ -476,8 +476,8 @@ global_costmap:
         
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+        cost_scaling_factor: 1.0
+        inflation_radius: 1.0
 
 bt_navigator:
   ros__parameters:
@@ -506,8 +506,8 @@ velocity_smoother:
     max_velocity: [0.25, 0.0, 0.7]
     min_velocity: [-0.15, 0.0, -0.7] 
     
-    max_accel: [0.3, 0.0, 0.8]   
-    max_decel: [-0.5, 0.0, -1.0]
+    max_accel: [0.3, 0.0, 0.1]   
+    max_decel: [-0.5, 0.0, -0.1]
 
     smoothing_frequency: 20.0
     feedback: OPEN_LOOP

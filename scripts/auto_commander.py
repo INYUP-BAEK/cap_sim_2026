@@ -81,8 +81,8 @@ class AutoNavCommander(Node):
                 smoother_params = {
                     'max_velocity': [0.18, 0.0, 0.55],
                     'min_velocity': [-0.1, 0.0, -0.55],
-                    'max_accel': [0.12, 0.0, 0.25],
-                    'max_decel': [-0.15, 0.0, -0.3]
+                    'max_accel': [0.12, 0.0, 0.1],
+                    'max_decel': [-0.15, 0.0, -0.1]
                 }
                 mode_str = f"아커만(카트 {self.cart_count}대) - 프론트 카메라 활성화"
             else:
