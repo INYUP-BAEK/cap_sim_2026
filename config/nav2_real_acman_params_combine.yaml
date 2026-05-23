@@ -21,14 +21,14 @@ controller_server:
       
       vx_std: 0.15                    
       vy_std: 0.0                    
-      wz_std: 0.4                    
+      wz_std: 0.7                    
       
       vx_max: 0.25                
       vx_min: -0.15                   
       vy_max: 0.0
       vy_min: 0.0
-      wz_max: 0.7                    
-      wz_min: -0.7
+      wz_max: 1.2                    
+      wz_min: -1.2
       
       iteration_count: 1
       prune_distance: 0.8            
@@ -44,7 +44,7 @@ controller_server:
         
       AckermannConstraints:
         # [기구학 동기화] 0.48m 휠베이스 물리적 회전 한계
-        min_turning_r: 0.40          
+        min_turning_r: 0.25         
 
       critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
       
@@ -428,7 +428,7 @@ global_costmap:
         decay_rate: 0.8
         voxel_size: 0.15
         track_unknown_space: true
-        max_obstacle_height: 2.5
+        max_obstacle_height: 0.0
         origin_z: 0.0
         publish_voxel_map: false
         combination_method: 1
@@ -440,8 +440,8 @@ global_costmap:
           marking: true
           clearing: true
           obstacle_range: 15.0    
-          min_obstacle_height: 0.1
-          max_obstacle_height: 1.5
+          min_obstacle_height: 0.0
+          max_obstacle_height: 0.01
           clear_after_reading: false  
           
       stvl_camera_layer:
@@ -503,11 +503,11 @@ velocity_smoother:
     odom_topic: /odometry 
     
     # 🚨 [최적화] MPPI 최대 조향 각속도(wz_max: 0.7)와 동기화
-    max_velocity: [0.25, 0.0, 0.7]
-    min_velocity: [-0.15, 0.0, -0.7] 
+    max_velocity: [0.25, 0.0, 1.2]
+    min_velocity: [-0.15, 0.0, -1.2] 
     
-    max_accel: [0.3, 0.0, 0.1]   
-    max_decel: [-0.5, 0.0, -0.1]
+    max_accel: [0.3, 0.0, 1.0]   
+    max_decel: [-0.5, 0.0, -1.0]
 
     smoothing_frequency: 20.0
     feedback: OPEN_LOOP
