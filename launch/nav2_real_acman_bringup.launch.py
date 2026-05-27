@@ -10,7 +10,7 @@ def generate_launch_description():
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
 
     params_file = os.path.join(cap_sim_dir, 'config', 'nav2_real_acman_params_combine.yaml') 
-    map_file = '/home/baek/colcon_ws/src/cap_sim_2026/maps/320.yaml' 
+    map_file = '/home/baek/colcon_ws/src/cap_sim_2026/maps/parking_map.yaml'  #320 parking_map
     rviz_config_file = os.path.join(cap_sim_dir, 'rviz', 'my.rviz')
 
     use_sim_time_bool = False 
