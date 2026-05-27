@@ -32,7 +32,7 @@ controller_server:
       
       iteration_count: 1
       prune_distance: 0.8            
-      transform_tolerance: 0.5 
+      transform_tolerance: 2.0 
       temperature: 0.3               
       gamma: 0.015
       motion_model: "Ackermann"      
@@ -117,7 +117,7 @@ controller_server:
       wz_min: -1.0
       iteration_count: 1
       prune_distance: 1.7            
-      transform_tolerance: 0.5 
+      transform_tolerance: 2.0 
       temperature: 0.3               
       gamma: 0.015
       motion_model: "DiffDrive"      
@@ -181,7 +181,7 @@ controller_server:
         max_angle_to_prefer: 0.785
 
     general_goal_checker:
-      stateful: True
+      stateful: False
       plugin: "nav2_controller::SimpleGoalChecker"
       # [최적화] 짧은 로봇 길이에 맞춰 정밀 타격 (10cm 오차 허용)
       xy_goal_tolerance: 0.10  

@@ -44,6 +44,24 @@ class AutoNavCommander(Node):
         self.is_attached = True
         self.cart_count = 0
         self.robot_state = "IDLE"
+        self.declare_parameter("detach_clear_delay_sec", 4.0)
+        self.detach_clear_delay_sec = float(
+            self.get_parameter("detach_clear_delay_sec").value
+        )
+        self.detach_clear_timer = None
+        self.declare_parameter("route_arrival_tolerance", 0.35)
+        self.route_arrival_tolerance = float(
+            self.get_parameter("route_arrival_tolerance").value
+        )
+        self.declare_parameter("route_goal_retry_delay_sec", 0.5)
+        self.route_goal_retry_delay_sec = float(
+            self.get_parameter("route_goal_retry_delay_sec").value
+        )
+        self.declare_parameter("route_goal_max_retries", 3)
+        self.route_goal_max_retries = int(
+            self.get_parameter("route_goal_max_retries").value
+        )
+        self.route_goal_retry_timer = None
 
         self.active_nav_goal_handle = None
         self.active_nav_goal_seq = 0
@@ -56,6 +74,7 @@ class AutoNavCommander(Node):
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.active_route_retry_count = 0
         self.current_patrol_waypoint_index = 0
 
         self.cart_final_goal_pose = None
@@ -64,11 +83,8 @@ class AutoNavCommander(Node):
         self.front_dock_goal_done = False
 
         self.patrol_path = [
-            (7.6, -16.34),
-            (3.02, -0.34),
-            (-8.76, -4.17),
-            (-4.7, -20.33),
-            (7.66, -16.14),
+            (6.15, -0.52),
+            (7.02, 1.95)
         ]
 
         self.global_footprint_pub = self.create_publisher(
@@ -161,7 +177,7 @@ class AutoNavCommander(Node):
         self.update_dynamic_state()
 
         if self.robot_state == "DETACHING" and not self.is_attached:
-            self.start_front_clear_move()
+            self.schedule_front_clear_move()
 
     def update_dynamic_state(self):
         self.update_nav2_footprint()
@@ -316,7 +332,6 @@ class AutoNavCommander(Node):
             )
 
             self._clear_route()
-            self._cancel_active_nav_goal()
             exit_route_points = self.build_waypoint_route_to_exit(
                 exit_projection,
                 current_progress,
@@ -341,9 +356,11 @@ class AutoNavCommander(Node):
             self.robot_state = "IDLE"
             return False
 
+        self.cancel_route_goal_retry_timer()
         self.active_route_type = route_type
         self.active_route_poses = poses
         self.active_route_index = 0
+        self.active_route_retry_count = 0
         return self._send_current_route_pose()
 
     def _send_current_route_pose(self):
@@ -382,20 +399,94 @@ class AutoNavCommander(Node):
             self.start_detach_sequence()
 
     def _clear_route(self):
+        self.cancel_route_goal_retry_timer()
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.active_route_retry_count = 0
+
+    def cancel_route_goal_retry_timer(self):
+        timer = self.route_goal_retry_timer
+        self.route_goal_retry_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+    def schedule_route_goal_retry(self):
+        if self.route_goal_retry_timer is not None:
+            return
+
+        delay_sec = max(0.0, self.route_goal_retry_delay_sec)
+        if delay_sec == 0.0:
+            self._send_current_route_pose()
+            return
+
+        self.route_goal_retry_timer = self.create_timer(
+            delay_sec,
+            self.route_goal_retry_timer_callback,
+        )
+
+    def route_goal_retry_timer_callback(self):
+        self.cancel_route_goal_retry_timer()
+
+        if self.robot_state not in ("PATROL", "APPROACH_EXIT"):
+            return
+
+        if self.active_route_index >= len(self.active_route_poses):
+            return
+
+        self._send_current_route_pose()
 
     def start_detach_sequence(self):
         self.robot_state = "DETACHING"
         self.enable_navigation_control()
+        self.cancel_detach_clear_timer()
 
         self.get_logger().info("🔓 이탈점 도착: 그리퍼 해제 및 프론트봇 home 동작으로 분리를 시작합니다.")
         self._publish_bool(self.gripper_toggle_pub, False)
         self._publish_bool(self.front_home_pub, True)
 
         if not self.is_attached:
+            self.schedule_front_clear_move()
+
+    def schedule_front_clear_move(self):
+        if self.detach_clear_timer is not None:
+            return
+
+        delay_sec = max(0.0, self.detach_clear_delay_sec)
+        if delay_sec == 0.0:
             self.start_front_clear_move()
+            return
+
+        self.get_logger().info(
+            f"⏳ 분리 안정화 대기: {delay_sec:.1f}초 후 프론트봇 전진을 시작합니다."
+        )
+        self.detach_clear_timer = self.create_timer(
+            delay_sec,
+            self.detach_clear_timer_callback,
+        )
+
+    def cancel_detach_clear_timer(self):
+        timer = self.detach_clear_timer
+        self.detach_clear_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+    def detach_clear_timer_callback(self):
+        self.cancel_detach_clear_timer()
+
+        if self.robot_state != "DETACHING":
+            return
+
+        if self.is_attached:
+            self.get_logger().warn(
+                "분리 안정화 시간이 지났지만 docking_state가 아직 True입니다. "
+                "프론트봇 전진을 보류합니다."
+            )
+            return
+
+        self.start_front_clear_move()
 
     def start_front_clear_move(self):
         if self.robot_state not in ("DETACHING", "FRONT_CLEARING"):
@@ -559,6 +650,34 @@ class AutoNavCommander(Node):
         self.get_logger().warn("로봇 base TF를 찾지 못해 waypoint index 기준으로 진행도를 추정합니다.")
         return None
 
+    def active_route_goal_reached_by_tf(self):
+        if self.active_route_index >= len(self.active_route_poses):
+            return True
+
+        target_pose = self.active_route_poses[self.active_route_index]
+        robot_pose = self.get_robot_pose_in_map(
+            ("base_link", "base_footprint", "rear_base_link")
+        )
+        if robot_pose is None:
+            self.get_logger().warn(
+                "Nav2 성공 결과를 받았지만 로봇 TF를 확인하지 못했습니다. "
+                "성공 판정을 그대로 사용합니다."
+            )
+            return True
+
+        target_x = target_pose.pose.position.x
+        target_y = target_pose.pose.position.y
+        robot_x, robot_y, _ = robot_pose
+        distance = math.hypot(robot_x - target_x, robot_y - target_y)
+        if distance <= self.route_arrival_tolerance:
+            return True
+
+        self.get_logger().warn(
+            f"Nav2가 waypoint 성공을 반환했지만 실제 거리는 {distance:.2f}m입니다 "
+            f"(허용 {self.route_arrival_tolerance:.2f}m). 다음 시퀀스로 넘기지 않습니다."
+        )
+        return False
+
     def get_robot_pose_in_map(self, frame_candidates):
         for frame_id in frame_candidates:
             try:
@@ -701,6 +820,7 @@ class AutoNavCommander(Node):
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = msg
+        goal_msg.pose.header.stamp = Time().to_msg()
 
         if not self.is_attached:
             goal_msg.behavior_tree = self.diff_bt_path
@@ -735,6 +855,7 @@ class AutoNavCommander(Node):
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = msg
+        goal_msg.pose.header.stamp = Time().to_msg()
 
         self.active_front_goal_seq += 1
         goal_seq = self.active_front_goal_seq
@@ -822,6 +943,22 @@ class AutoNavCommander(Node):
             return
 
         if self.robot_state in ("PATROL", "APPROACH_EXIT"):
+            if not self.active_route_goal_reached_by_tf():
+                if self.active_route_retry_count < self.route_goal_max_retries:
+                    self.active_route_retry_count += 1
+                    self.get_logger().warn(
+                        f"동일 waypoint 재시도 "
+                        f"{self.active_route_retry_count}/{self.route_goal_max_retries}"
+                    )
+                    self.schedule_route_goal_retry()
+                else:
+                    self.get_logger().error(
+                        "waypoint 도착 검증 실패가 반복되어 순찰 시퀀스를 중단합니다."
+                    )
+                    self.robot_state = "IDLE"
+                    self._clear_route()
+                return
+
             if self.robot_state == "PATROL":
                 self.current_patrol_waypoint_index = max(
                     self.current_patrol_waypoint_index,
@@ -829,6 +966,7 @@ class AutoNavCommander(Node):
                 )
 
             self.active_route_index += 1
+            self.active_route_retry_count = 0
             self._send_current_route_pose()
         elif self.robot_state == "REAR_ALIGNING":
             self.get_logger().info("✅ 리어봇 heading 정렬 완료. 정밀 카트 pose 입력을 기다립니다.")
