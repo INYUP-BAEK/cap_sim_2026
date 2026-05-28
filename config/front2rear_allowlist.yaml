@@ -1,0 +1,99 @@
+version: v4.0
+
+# DDS Router configuration for the rearbot <-> frontbot bridge.
+#
+# Current ROS 2 middleware observed on this PC:
+#   RMW: rmw_fastrtps_cpp
+#   ROS_DOMAIN_ID in the current shell: 48
+#
+# This file assumes the actual deployment isolates the two robot PCs into
+# different ROS domains and lets DDS Router bridge only the topics below.
+# The participant domain values below must match the ROS_DOMAIN_ID used on
+# each robot PC.
+#
+# Topic names are DDS names. ROS 2 topics use the rt/ prefix and ROS 2
+# service/action request-reply topics use rq/ and rr/.
+#
+# The allowlist controls which topics DDS Router is allowed to discover/relay.
+# This Vulcanexus Router v4-compatible file intentionally uses only generic
+# bidirectional routes. The previous topic-routes + type "*" setup can fail to
+# match actual ROS 2 DDS types on some Vulcanexus Router builds, which blocks
+# every topic because the generic routes are disabled.
+#
+# Keep raw camera images, raw point clouds, lidar scans, voxel maps, full
+# costmaps, and RViz marker/debug topics out of this file unless a remote
+# consumer is absolutely required. Those are the main DDS bottleneck sources.
+
+participants:
+  - name: frontbot
+    kind: local
+    domain: 48
+    transport: udp
+    ignore-participant-flags: no_filter
+
+  - name: rearbot
+    kind: local
+    domain: 49
+    transport: udp
+    ignore-participant-flags: no_filter
+
+# Forward only allowlisted topics between the two isolated ROS domains.
+routes:
+  - src: frontbot
+    dst:
+      - rearbot
+  - src: rearbot
+    dst:
+      - frontbot
+
+allowlist:
+  # Bidirectional graph/TF.
+  #
+  # ros_discovery_info forwards ROS graph metadata. With this enabled,
+  # ros2 topic list may show remote topics that are not otherwise allowlisted.
+  # That does not mean user data is being forwarded. Verify filtering with
+  # ros2 topic echo on the test topic. Removing this topic makes the graph
+  # stricter, but action/service discovery can become unreliable.
+  - name: ros_discovery_info
+  - name: rt/tf
+  - name: rt/tf_static
+
+  # Rearbot -> Frontbot: scenario commands, shared mode, front Nav2/control input
+  - name: rt/map
+  - name: rt/cart_count
+  - name: rt/gripper_toggle
+  - name: rt/docking_state
+  - name: rt/docking_target
+  - name: rt/cmd_vel
+  - name: rt/cmd_vel_joy
+  - name: rt/front/cmd_vel
+  - name: rt/front/cmd_vel_joy
+  - name: rt/front/joy_control_sig
+  - name: rt/front/home
+  - name: rt/front/cart_docking
+  - name: rt/front/robot_docking
+  - name: rt/front/initialpose
+  - name: rt/front/global_costmap/footprint
+  - name: rt/front/local_costmap/footprint
+
+  # Frontbot NavigateToPose action requests from rear scenario_runner
+  - name: rq/front/navigate_to_pose/_action/send_goalRequest
+  - name: rq/front/navigate_to_pose/_action/get_resultRequest
+  - name: rq/front/navigate_to_pose/_action/cancel_goalRequest
+
+  # Frontbot -> Rearbot: action responses, state feedback, precise vision outputs
+  - name: rr/front/navigate_to_pose/_action/send_goalReply
+  - name: rr/front/navigate_to_pose/_action/get_resultReply
+  - name: rr/front/navigate_to_pose/_action/cancel_goalReply
+  - name: rt/front/navigate_to_pose/_action/feedback
+  - name: rt/front/navigate_to_pose/_action/status
+  - name: rt/front/odom
+  - name: rt/front/odom_wheel
+  - name: rt/front/amcl_pose
+  - name: rt/front/rmd_state
+  - name: rt/front/cart_pose
+  - name: rt/front/rs/cart_pose
+  - name: rt/front/rear_cart_pose
+  - name: rt/vision/cart_target_ground
+  - name: rt/vision/cart_precise_pose
+  - name: rt/vision/cart_precise_pose_2d

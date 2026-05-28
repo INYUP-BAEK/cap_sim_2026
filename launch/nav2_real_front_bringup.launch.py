@@ -14,7 +14,7 @@ def generate_launch_description():
     params_file = os.path.join(my_pkg_dir, 'config', 'nav2_real_front_params.yaml')
     ekf_params_file = os.path.join(my_pkg_dir, 'config', 'nav2_real_front_ekf.yaml')
     rviz_config_file = os.path.join(my_pkg_dir, 'rviz', 'front.rviz')
-    map_yaml_file = os.path.join(my_pkg_dir, 'maps', 'parking_map.yaml')
+    map_yaml_file = os.path.join(my_pkg_dir, 'maps', '320.yaml')
 
     ld = LaunchDescription()
 

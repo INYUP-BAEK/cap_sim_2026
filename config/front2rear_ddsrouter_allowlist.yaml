@@ -1,0 +1,83 @@
+version: v5.0
+
+# DDS Router configuration for the rearbot <-> frontbot bridge.
+#
+# Use this file with the official source-built `ddsrouter`, not the snap
+# `vulcanexus-router` package. The robot PCs must run in isolated ROS domains:
+#   frontbot ROS_DOMAIN_ID=48
+#   rearbot  ROS_DOMAIN_ID=49
+#
+# Topic names are DDS names. ROS 2 topics use the rt/ prefix and ROS 2
+# service/action request-reply topics use rq/ and rr/.
+#
+# This file keeps the route shape intentionally simple for reliability:
+# allowlisted topics are forwarded bidirectionally between the two domains.
+# Directional topic-routes can be restored later with exact DDS types, but
+# wildcard topic-routes are brittle across DDS Router versions.
+
+participants:
+  - name: frontbot
+    kind: local
+    domain: 48
+    transport: udp
+    ignore-participant-flags: no_filter
+
+  - name: rearbot
+    kind: local
+    domain: 49
+    transport: udp
+    ignore-participant-flags: no_filter
+
+routes:
+  - src: frontbot
+    dst:
+      - rearbot
+  - src: rearbot
+    dst:
+      - frontbot
+
+allowlist:
+  # ROS graph/TF
+  - name: ros_discovery_info
+  - name: rt/tf
+  - name: rt/tf_static
+
+  # Scenario commands and shared mode/control topics
+  - name: rt/map
+  - name: rt/cart_count
+  - name: rt/gripper_toggle
+  - name: rt/docking_state
+  - name: rt/docking_target
+  - name: rt/cmd_vel
+  - name: rt/cmd_vel_joy
+  - name: rt/front/cmd_vel
+  - name: rt/front/cmd_vel_joy
+  - name: rt/front/joy_control_sig
+  - name: rt/front/home
+  - name: rt/front/cart_docking
+  - name: rt/front/robot_docking
+  - name: rt/front/initialpose
+  - name: rt/front/global_costmap/footprint
+  - name: rt/front/local_costmap/footprint
+
+  # Frontbot NavigateToPose action requests from rear scenario_runner
+  - name: rq/front/navigate_to_pose/_action/send_goalRequest
+  - name: rq/front/navigate_to_pose/_action/get_resultRequest
+  - name: rq/front/navigate_to_pose/_action/cancel_goalRequest
+
+  # Frontbot action responses, state feedback, odometry, and vision outputs
+  - name: rr/front/navigate_to_pose/_action/send_goalReply
+  - name: rr/front/navigate_to_pose/_action/get_resultReply
+  - name: rr/front/navigate_to_pose/_action/cancel_goalReply
+  - name: rt/front/navigate_to_pose/_action/feedback
+  - name: rt/front/navigate_to_pose/_action/status
+  - name: rt/front/odom
+  - name: rt/front/odom_wheel
+  - name: rt/front/amcl_pose
+  - name: rt/front/rmd_state
+  - name: rt/front/cart_pose
+  - name: rt/front/rs/cart_pose
+  - name: rt/front/rear_cart_pose
+  - name: rt/vision/cart_target_ground
+  - name: rt/vision/cart_precise_pose
+  - name: rt/vision/cart_precise_pose_2d
