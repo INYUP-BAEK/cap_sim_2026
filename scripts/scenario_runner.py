@@ -43,6 +43,7 @@ class AutoNavCommander(Node):
         self.declare_parameter("force_attached_on_patrol_start", True)
         self.declare_parameter("route_goal_max_retries", 6)
         self.declare_parameter("route_goal_retry_delay_sec", 1.0)
+        self.declare_parameter("route_arrival_tolerance", 0.35)
 
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self.front_nav_client = ActionClient(
@@ -63,6 +64,15 @@ class AutoNavCommander(Node):
         self.is_attached = True
         self.cart_count = 0
         self.robot_state = "IDLE"
+        self.route_arrival_tolerance = float(
+            self.get_parameter("route_arrival_tolerance").value
+        )
+        self.route_goal_retry_delay_sec = float(
+            self.get_parameter("route_goal_retry_delay_sec").value
+        )
+        self.route_goal_max_retries = int(
+            self.get_parameter("route_goal_max_retries").value
+        )
 
         self.active_nav_goal_handle = None
         self.active_nav_goal_seq = 0
@@ -131,11 +141,8 @@ class AutoNavCommander(Node):
         )
 
         self.patrol_path = [
-            (7.6, -16.34),
-            (3.02, -0.34),
-            (-8.76, -4.17),
-            (-4.7, -20.33),
-            (7.66, -16.14),
+            (6.15, -0.52),
+            (7.02, 1.95)
         ]
 
         self.global_footprint_pub = self.create_publisher(
@@ -480,7 +487,6 @@ class AutoNavCommander(Node):
             )
 
             self._clear_route()
-            self._cancel_active_nav_goal()
             exit_route_points = self.build_waypoint_route_to_exit(
                 exit_projection,
                 current_progress,
@@ -505,6 +511,7 @@ class AutoNavCommander(Node):
             self.robot_state = "IDLE"
             return False
 
+        self.cancel_route_goal_retry_timer()
         self.active_route_type = route_type
         self.active_route_poses = poses
         self.active_route_index = 0
@@ -546,10 +553,14 @@ class AutoNavCommander(Node):
             self.start_detach_sequence()
 
     def _clear_route(self):
+        self.cancel_route_goal_retry_timer()
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
         self.route_goal_retry_count = 0
+
+    def cancel_route_goal_retry_timer(self):
+        self._cancel_retry("route_goal_retry")
 
     def _is_route_state_active(self):
         return (
@@ -918,6 +929,34 @@ class AutoNavCommander(Node):
         self.get_logger().warn("로봇 base TF를 찾지 못해 waypoint index 기준으로 진행도를 추정합니다.")
         return None
 
+    def active_route_goal_reached_by_tf(self):
+        if self.active_route_index >= len(self.active_route_poses):
+            return True
+
+        target_pose = self.active_route_poses[self.active_route_index]
+        robot_pose = self.get_robot_pose_in_map(
+            ("base_link", "base_footprint", "rear_base_link")
+        )
+        if robot_pose is None:
+            self.get_logger().warn(
+                "Nav2 성공 결과를 받았지만 로봇 TF를 확인하지 못했습니다. "
+                "성공 판정을 그대로 사용합니다."
+            )
+            return True
+
+        target_x = target_pose.pose.position.x
+        target_y = target_pose.pose.position.y
+        robot_x, robot_y, _ = robot_pose
+        distance = math.hypot(robot_x - target_x, robot_y - target_y)
+        if distance <= self.route_arrival_tolerance:
+            return True
+
+        self.get_logger().warn(
+            f"Nav2가 waypoint 성공을 반환했지만 실제 거리는 {distance:.2f}m입니다 "
+            f"(허용 {self.route_arrival_tolerance:.2f}m). 다음 시퀀스로 넘기지 않습니다."
+        )
+        return False
+
     def get_robot_pose_in_map(self, frame_candidates):
         for frame_id in frame_candidates:
             frame_id = self._normalize_frame_id(frame_id)
@@ -1070,6 +1109,7 @@ class AutoNavCommander(Node):
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = msg
+        goal_msg.pose.header.stamp = Time().to_msg()
 
         if not self.is_attached:
             goal_msg.behavior_tree = self.diff_bt_path
@@ -1104,6 +1144,7 @@ class AutoNavCommander(Node):
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = msg
+        goal_msg.pose.header.stamp = Time().to_msg()
 
         self.active_front_goal_seq += 1
         goal_seq = self.active_front_goal_seq
@@ -1195,6 +1236,10 @@ class AutoNavCommander(Node):
             return
 
         if self.robot_state in ("PATROL", "APPROACH_EXIT"):
+            if not self.active_route_goal_reached_by_tf():
+                self._handle_route_goal_failure("Nav2 route waypoint 도착 검증 실패")
+                return
+
             self.route_goal_retry_count = 0
             if self.robot_state == "PATROL":
                 self.current_patrol_waypoint_index = max(

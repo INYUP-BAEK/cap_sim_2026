@@ -54,7 +54,7 @@ front:
         wz_min: -1.0
         iteration_count: 1
         prune_distance: 1.7            
-        transform_tolerance: 1.0 
+        transform_tolerance: 2.0 
         temperature: 0.3               
         gamma: 0.015
         motion_model: "DiffDrive"      
@@ -118,7 +118,7 @@ front:
           max_angle_to_prefer: 0.785
 
       general_goal_checker:
-        stateful: True
+        stateful: False
         plugin: "nav2_controller::SimpleGoalChecker"
         xy_goal_tolerance: 0.2
         yaw_goal_tolerance: 0.5
