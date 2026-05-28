@@ -12,8 +12,16 @@ from rclpy.time import Time
 from rcl_interfaces.srv import SetParameters
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Point32, PointStamped, Polygon, Pose2D, PoseStamped
+from geometry_msgs.msg import (
+    Point32,
+    PointStamped,
+    Polygon,
+    Pose2D,
+    PoseArray,
+    PoseStamped,
+)
 from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import Path
 from std_msgs.msg import Bool, Empty, UInt16
 
 from ament_index_python.packages import get_package_share_directory
@@ -24,6 +32,17 @@ import tf2_ros
 class AutoNavCommander(Node):
     def __init__(self):
         super().__init__("auto_nav_commander")
+
+        self.declare_parameter("precise_pose2d_frame", "base_link")
+        self.declare_parameter("front_clear_after_detach_delay_sec", 2.0)
+        self.declare_parameter("detach_timeout_sec", 12.0)
+        self.declare_parameter("precise_pose_timeout_sec", 10.0)
+        self.declare_parameter("command_burst_duration_sec", 0.5)
+        self.declare_parameter("command_burst_period_sec", 0.1)
+        self.declare_parameter("ignore_unexpected_docking_false", True)
+        self.declare_parameter("force_attached_on_patrol_start", True)
+        self.declare_parameter("route_goal_max_retries", 6)
+        self.declare_parameter("route_goal_retry_delay_sec", 1.0)
 
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self.front_nav_client = ActionClient(
@@ -56,12 +75,60 @@ class AutoNavCommander(Node):
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.route_goal_retry_count = 0
         self.current_patrol_waypoint_index = 0
 
         self.cart_final_goal_pose = None
         self.detected_cart_pose = None
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
+        self.front_clear_tf_retry_count = 0
+        self.front_clear_goal_retry_count = 0
+        self.rear_align_tf_retry_count = 0
+        self.rear_align_goal_retry_count = 0
+        self.precise_goal_retry_count = 0
+        self.max_state_retries = 20
+        self.pending_timers = {}
+        self.pending_precise_cart_pose_msg = None
+        self.pending_precise_cart_pose_type = None
+        self.unexpected_docking_false_warned = False
+        self.precise_pose2d_frame = self._normalize_frame_id(
+            self.get_parameter("precise_pose2d_frame").value
+        )
+        self.front_clear_after_detach_delay_sec = max(
+            0.0,
+            float(self.get_parameter("front_clear_after_detach_delay_sec").value),
+        )
+        self.detach_timeout_sec = max(
+            0.0,
+            float(self.get_parameter("detach_timeout_sec").value),
+        )
+        self.precise_pose_timeout_sec = max(
+            0.0,
+            float(self.get_parameter("precise_pose_timeout_sec").value),
+        )
+        self.command_burst_duration_sec = max(
+            0.0,
+            float(self.get_parameter("command_burst_duration_sec").value),
+        )
+        self.command_burst_period_sec = max(
+            0.02,
+            float(self.get_parameter("command_burst_period_sec").value),
+        )
+        self.ignore_unexpected_docking_false = bool(
+            self.get_parameter("ignore_unexpected_docking_false").value
+        )
+        self.force_attached_on_patrol_start = bool(
+            self.get_parameter("force_attached_on_patrol_start").value
+        )
+        self.route_goal_max_retries = max(
+            0,
+            int(self.get_parameter("route_goal_max_retries").value),
+        )
+        self.route_goal_retry_delay_sec = max(
+            0.1,
+            float(self.get_parameter("route_goal_retry_delay_sec").value),
+        )
 
         self.patrol_path = [
             (7.6, -16.34),
@@ -93,6 +160,7 @@ class AutoNavCommander(Node):
         )
         self.gripper_toggle_pub = self.create_publisher(Bool, "/gripper_toggle", 10)
         self.front_home_pub = self.create_publisher(Bool, "/front/home", 10)
+        self.docking_state_pub = self.create_publisher(Bool, "/docking_state", 10)
         self.rear_joy_sig_pub = self.create_publisher(Bool, "/joy_control_sig", 10)
         self.front_joy_sig_pub = self.create_publisher(Bool, "/front/joy_control_sig", 10)
 
@@ -135,10 +203,28 @@ class AutoNavCommander(Node):
             self.precise_cart_pose2d_callback,
             10,
         )
+        self.rear_rs_cart_pose_sub = self.create_subscription(
+            Pose2D,
+            "/rear/rs/cart_pose",
+            self.precise_cart_pose2d_callback,
+            10,
+        )
         self.mission_start_sub = self.create_subscription(
             Empty,
             "/start_patrol_mission",
             self.start_mission_callback,
+            10,
+        )
+        self.mission_path_sub = self.create_subscription(
+            Path,
+            "/mission_path",
+            self.mission_path_callback,
+            10,
+        )
+        self.mission_waypoints_sub = self.create_subscription(
+            PoseArray,
+            "/mission_waypoints",
+            self.mission_waypoints_callback,
             10,
         )
 
@@ -153,15 +239,39 @@ class AutoNavCommander(Node):
         self.update_dynamic_state()
 
     def docking_callback(self, msg: Bool):
-        if self.is_attached == msg.data:
+        next_attached = bool(msg.data)
+        detach_expected_states = (
+            "DETACHING",
+            "FRONT_CLEARING",
+            "REAR_ALIGNING",
+            "WAIT_PRECISE_CART_POSE",
+            "DOCK_GOALS_ACTIVE",
+        )
+
+        if (
+            self.ignore_unexpected_docking_false
+            and not next_attached
+            and self.is_attached
+            and self.robot_state not in detach_expected_states
+        ):
+            if not self.unexpected_docking_false_warned:
+                self.get_logger().warn(
+                    "/docking_state=false가 분리 시퀀스 밖에서 들어와 무시합니다. "
+                    "초기 frontbot_control_node false publish라면 정상입니다."
+                )
+                self.unexpected_docking_false_warned = True
             return
 
-        self.is_attached = msg.data
+        if self.is_attached == next_attached:
+            return
+
+        self.is_attached = next_attached
+        self.unexpected_docking_false_warned = False
         self.get_logger().info(f"🔗 결합 상태 업데이트: {self.is_attached}")
         self.update_dynamic_state()
 
         if self.robot_state == "DETACHING" and not self.is_attached:
-            self.start_front_clear_move()
+            self._schedule_front_clear_after_detach()
 
     def update_dynamic_state(self):
         self.update_nav2_footprint()
@@ -222,10 +332,62 @@ class AutoNavCommander(Node):
             return
 
         self.get_logger().info("🚀 [미션 가동] 순차 waypoint 순찰 주행을 시작합니다!")
-        self.enable_navigation_control()
+        self.start_patrol_route(self.patrol_path)
+
+    def mission_path_callback(self, msg: Path):
+        if self.robot_state != "IDLE":
+            self.get_logger().warn("⚠️ 현재 다른 주행 임무를 수행 중입니다. mission_path 무시.")
+            return
+
+        points = [
+            (pose.pose.position.x, pose.pose.position.y)
+            for pose in msg.poses
+        ]
+        self.get_logger().info(
+            f"🚀 mission_path 수신: {len(points)}개 waypoint로 순찰을 시작합니다."
+        )
+        self.start_patrol_route(points)
+
+    def mission_waypoints_callback(self, msg: PoseArray):
+        if self.robot_state != "IDLE":
+            self.get_logger().warn("⚠️ 현재 다른 주행 임무를 수행 중입니다. mission_waypoints 무시.")
+            return
+
+        points = [
+            (pose.position.x, pose.position.y)
+            for pose in msg.poses
+        ]
+        self.get_logger().info(
+            f"🚀 mission_waypoints 수신: {len(points)}개 waypoint로 순찰을 시작합니다."
+        )
+        self.start_patrol_route(points)
+
+    def start_patrol_route(self, points):
+        clean_points = []
+        for x, y in points:
+            if not (math.isfinite(x) and math.isfinite(y)):
+                self.get_logger().warn(
+                    f"유효하지 않은 waypoint({x}, {y})가 있어 순찰 경로에서 제외합니다."
+                )
+                continue
+            clean_points.append((float(x), float(y)))
+
+        if len(clean_points) < 2:
+            self.get_logger().error(
+                "순찰 waypoint는 최소 2개 이상 필요합니다. "
+                f"현재 유효 waypoint 수={len(clean_points)}"
+            )
+            return False
+
+        self._cancel_all_retries()
+        self._cancel_active_nav_goal()
+        self._cancel_active_front_goal()
+        self._prepare_attached_patrol_mode()
+        self.patrol_path = clean_points
         self.current_patrol_waypoint_index = 0
+        self.route_goal_retry_count = 0
         self.robot_state = "PATROL"
-        self._start_route(self.patrol_path, "PATROL")
+        return self._start_route(clean_points, "PATROL")
 
     def mission_goal_callback(self, msg: PoseStamped):
         self.get_logger().info(
@@ -233,6 +395,7 @@ class AutoNavCommander(Node):
             f"Y={msg.pose.position.y:.2f}"
         )
         self._clear_route()
+        self._cancel_all_retries()
         self._cancel_active_nav_goal()
         self._cancel_active_front_goal()
         self.robot_state = "IDLE"
@@ -245,6 +408,7 @@ class AutoNavCommander(Node):
         if not msg.header.frame_id:
             self.get_logger().warn("카트 좌표 frame_id가 비어 있어 무시합니다.")
             return
+        source_frame = self._normalize_frame_id(msg.header.frame_id)
 
         if self.active_nav_goal_handle is None and self.active_nav_goal_pending:
             self.get_logger().warn("순찰 goal이 아직 accept되지 않아 카트 목표 처리를 잠시 보류합니다.")
@@ -265,7 +429,7 @@ class AutoNavCommander(Node):
         ratio = (distance_to_cart - stop_distance) / distance_to_cart
 
         local_goal_pose = PoseStamped()
-        local_goal_pose.header.frame_id = msg.header.frame_id
+        local_goal_pose.header.frame_id = source_frame
         local_goal_pose.header.stamp = current_time.to_msg()
         local_goal_pose.pose.position.x = cart_x * ratio
         local_goal_pose.pose.position.y = cart_y * ratio
@@ -273,7 +437,7 @@ class AutoNavCommander(Node):
         local_goal_pose.pose.orientation.w = math.cos(yaw_to_cart / 2.0)
 
         local_cart_pose = PoseStamped()
-        local_cart_pose.header.frame_id = msg.header.frame_id
+        local_cart_pose.header.frame_id = source_frame
         local_cart_pose.header.stamp = current_time.to_msg()
         local_cart_pose.pose.position.x = cart_x
         local_cart_pose.pose.position.y = cart_y
@@ -281,7 +445,7 @@ class AutoNavCommander(Node):
         local_cart_pose.pose.orientation.w = math.cos(yaw_to_cart / 2.0)
 
         try:
-            transform = self.tf_buffer.lookup_transform("map", msg.header.frame_id, Time())
+            transform = self.tf_buffer.lookup_transform("map", source_frame, Time())
             cart_goal_pose = tf2_geometry_msgs.do_transform_pose(local_goal_pose.pose, transform)
             cart_map_pose = tf2_geometry_msgs.do_transform_pose(local_cart_pose.pose, transform)
 
@@ -344,6 +508,7 @@ class AutoNavCommander(Node):
         self.active_route_type = route_type
         self.active_route_poses = poses
         self.active_route_index = 0
+        self.route_goal_retry_count = 0
         return self._send_current_route_pose()
 
     def _send_current_route_pose(self):
@@ -364,8 +529,7 @@ class AutoNavCommander(Node):
             )
 
         if not self._send_nav_goal(pose):
-            self._clear_route()
-            self.robot_state = "IDLE"
+            self._handle_route_goal_failure("Nav2 goal 전송 실패")
             return False
 
         return True
@@ -385,28 +549,107 @@ class AutoNavCommander(Node):
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.route_goal_retry_count = 0
+
+    def _is_route_state_active(self):
+        return (
+            self.active_route_type in ("PATROL", "EXIT")
+            and self.robot_state in ("PATROL", "APPROACH_EXIT")
+            and bool(self.active_route_poses)
+        )
+
+    def _handle_route_goal_failure(self, reason):
+        if not self._is_route_state_active():
+            self.robot_state = "IDLE"
+            return
+
+        self.route_goal_retry_count += 1
+        if self.route_goal_retry_count > self.route_goal_max_retries:
+            self.get_logger().error(
+                f"{reason}. route goal 재시도 한도를 초과해 시나리오를 중단합니다. "
+                f"route={self.active_route_type}, "
+                f"index={self.active_route_index + 1}/{len(self.active_route_poses)}"
+            )
+            self._clear_route()
+            self.robot_state = "IDLE"
+            return
+
+        self.get_logger().warn(
+            f"{reason}. 현재 waypoint를 재시도합니다. "
+            f"route={self.active_route_type}, "
+            f"index={self.active_route_index + 1}/{len(self.active_route_poses)}, "
+            f"retry={self.route_goal_retry_count}/{self.route_goal_max_retries}"
+        )
+        self._schedule_once(
+            "route_goal_retry",
+            self.route_goal_retry_delay_sec,
+            self._send_current_route_pose,
+        )
+
+    def _prepare_attached_patrol_mode(self):
+        self.enable_navigation_control()
+        if not self.force_attached_on_patrol_start:
+            return
+
+        if not self.is_attached:
+            self.get_logger().warn(
+                "순찰 시작 시 attached 모드로 강제 동기화합니다. "
+                "실제 분리 상태라면 force_attached_on_patrol_start를 false로 두세요."
+            )
+        self.is_attached = True
+        self.update_dynamic_state()
+        self._publish_bool_burst("attached_drive_mode_cmd", self.docking_state_pub, True)
 
     def start_detach_sequence(self):
         self.robot_state = "DETACHING"
         self.enable_navigation_control()
+        self.front_clear_tf_retry_count = 0
+        self.front_clear_goal_retry_count = 0
+        self.rear_align_tf_retry_count = 0
+        self.rear_align_goal_retry_count = 0
+        self.precise_goal_retry_count = 0
 
         self.get_logger().info("🔓 이탈점 도착: 그리퍼 해제 및 프론트봇 home 동작으로 분리를 시작합니다.")
-        self._publish_bool(self.gripper_toggle_pub, False)
-        self._publish_bool(self.front_home_pub, True)
+        self._publish_bool_burst("gripper_release_cmd", self.gripper_toggle_pub, False)
+        self._publish_bool_burst("front_home_cmd", self.front_home_pub, True)
+
+        if self.detach_timeout_sec > 0.0:
+            self._schedule_once(
+                "detach_timeout",
+                self.detach_timeout_sec,
+                self._handle_detach_timeout,
+            )
 
         if not self.is_attached:
-            self.start_front_clear_move()
+            self._schedule_front_clear_after_detach()
 
     def start_front_clear_move(self):
         if self.robot_state not in ("DETACHING", "FRONT_CLEARING"):
             return
+        self._cancel_retry("detach_timeout")
+        self._cancel_retry("front_clear_start")
 
         front_pose = self.get_robot_pose_in_map(("front/base_footprint", "front/base_link"))
         if front_pose is None:
+            self.front_clear_tf_retry_count += 1
+            if self.front_clear_tf_retry_count <= self.max_state_retries:
+                self.get_logger().warn(
+                    "프론트봇 TF를 아직 찾지 못했습니다. "
+                    f"50cm 전진 목표 생성을 재시도합니다. "
+                    f"({self.front_clear_tf_retry_count}/{self.max_state_retries})"
+                )
+                self._schedule_once(
+                    "front_clear_tf_retry",
+                    0.5,
+                    self.start_front_clear_move,
+                )
+                return
+
             self.get_logger().error("프론트봇 TF를 찾지 못해 50cm 전진 목표를 만들 수 없습니다.")
             self.robot_state = "IDLE"
             return
 
+        self.front_clear_tf_retry_count = 0
         x, y, yaw = front_pose
         clear_distance = 0.5
         goal = self._create_pose_stamped(
@@ -421,7 +664,23 @@ class AutoNavCommander(Node):
             f"{clear_distance:.2f}m 전진 목표를 보냅니다."
         )
         if not self._send_front_nav_goal(goal):
+            self.front_clear_goal_retry_count += 1
+            if self.front_clear_goal_retry_count <= self.max_state_retries:
+                self.get_logger().warn(
+                    "프론트 Nav2 goal 전송에 실패해 50cm 전진 목표를 재시도합니다. "
+                    f"({self.front_clear_goal_retry_count}/{self.max_state_retries})"
+                )
+                self._schedule_once(
+                    "front_clear_goal_retry",
+                    0.5,
+                    self.start_front_clear_move,
+                )
+                return
+
             self.robot_state = "IDLE"
+            return
+
+        self.front_clear_goal_retry_count = 0
 
     def start_rear_heading_alignment(self):
         if self.detected_cart_pose is None:
@@ -431,10 +690,25 @@ class AutoNavCommander(Node):
 
         rear_pose = self.get_robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
         if rear_pose is None:
+            self.rear_align_tf_retry_count += 1
+            if self.rear_align_tf_retry_count <= self.max_state_retries:
+                self.get_logger().warn(
+                    "리어봇 TF를 아직 찾지 못했습니다. "
+                    f"heading 정렬 목표 생성을 재시도합니다. "
+                    f"({self.rear_align_tf_retry_count}/{self.max_state_retries})"
+                )
+                self._schedule_once(
+                    "rear_align_tf_retry",
+                    0.5,
+                    self.start_rear_heading_alignment,
+                )
+                return
+
             self.get_logger().error("리어봇 TF를 찾지 못해 heading 정렬 목표를 만들 수 없습니다.")
             self.robot_state = "IDLE"
             return
 
+        self.rear_align_tf_retry_count = 0
         rear_x, rear_y, _ = rear_pose
         cart_x = self.detected_cart_pose.pose.position.x
         cart_y = self.detected_cart_pose.pose.position.y
@@ -444,15 +718,37 @@ class AutoNavCommander(Node):
         self.robot_state = "REAR_ALIGNING"
         self.get_logger().info("🎯 리어봇을 카트 방향으로 회전시켜 정밀 자세 추정을 준비합니다.")
         if not self._send_nav_goal(goal):
+            self.rear_align_goal_retry_count += 1
+            if self.rear_align_goal_retry_count <= self.max_state_retries:
+                self.get_logger().warn(
+                    "리어 Nav2 goal 전송에 실패해 heading 정렬 목표를 재시도합니다. "
+                    f"({self.rear_align_goal_retry_count}/{self.max_state_retries})"
+                )
+                self._schedule_once(
+                    "rear_align_goal_retry",
+                    0.5,
+                    self.start_rear_heading_alignment,
+                )
+                return
+
             self.robot_state = "IDLE"
+            return
+
+        self.rear_align_goal_retry_count = 0
 
     def precise_cart_pose_callback(self, msg: PoseStamped):
         if self.robot_state != "WAIT_PRECISE_CART_POSE":
+            if self.robot_state == "REAR_ALIGNING":
+                self.pending_precise_cart_pose_msg = msg
+                self.pending_precise_cart_pose_type = "PoseStamped"
             return
 
         try:
-            if msg.header.frame_id and msg.header.frame_id != "map":
-                transform = self.tf_buffer.lookup_transform("map", msg.header.frame_id, Time())
+            source_frame = self._normalize_frame_id(
+                msg.header.frame_id or self.precise_pose2d_frame
+            )
+            if source_frame and source_frame != "map":
+                transform = self.tf_buffer.lookup_transform("map", source_frame, Time())
                 cart_pose = tf2_geometry_msgs.do_transform_pose(msg.pose, transform)
             else:
                 cart_pose = msg.pose
@@ -473,15 +769,34 @@ class AutoNavCommander(Node):
 
     def precise_cart_pose2d_callback(self, msg: Pose2D):
         if self.robot_state != "WAIT_PRECISE_CART_POSE":
+            if self.robot_state == "REAR_ALIGNING":
+                self.pending_precise_cart_pose_msg = msg
+                self.pending_precise_cart_pose_type = "Pose2D"
             return
 
-        self.handle_precise_cart_pose(msg.x, msg.y, msg.theta, "Pose2D")
+        try:
+            cart_pose = self.pose2d_to_map_pose(msg)
+        except tf2_ros.TransformException as ex:
+            self.get_logger().warning(f"정밀 카트 Pose2D TF 변환 실패: {ex}")
+            return
+        except Exception as ex:
+            self.get_logger().error(f"정밀 카트 Pose2D 처리 중 예외 발생: {ex}")
+            return
+
+        yaw = self.yaw_from_quaternion(cart_pose.orientation)
+        self.handle_precise_cart_pose(
+            cart_pose.position.x,
+            cart_pose.position.y,
+            yaw,
+            f"Pose2D/{self.precise_pose2d_frame or 'map'}",
+        )
 
     def handle_precise_cart_pose(self, cart_x, cart_y, cart_yaw, source):
         if not all(math.isfinite(v) for v in (cart_x, cart_y, cart_yaw)):
             self.get_logger().warn("정밀 카트 pose에 유효하지 않은 값이 있어 무시합니다.")
             return
 
+        self._cancel_retry("precise_pose_timeout")
         cart_yaw = self.normalize_angle(cart_yaw)
         offset = 1.0
 
@@ -498,6 +813,7 @@ class AutoNavCommander(Node):
 
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("리어 Nav2 서버가 응답하지 않아 도킹 준비 goal을 보내지 않습니다.")
+            self._schedule_precise_goal_retry(cart_x, cart_y, cart_yaw, source)
             return
 
         if not self.front_nav_client.wait_for_server(timeout_sec=2.0):
@@ -505,8 +821,10 @@ class AutoNavCommander(Node):
                 "프론트 Nav2 서버(/front/navigate_to_pose)가 응답하지 않아 "
                 "도킹 준비 goal을 보내지 않습니다."
             )
+            self._schedule_precise_goal_retry(cart_x, cart_y, cart_yaw, source)
             return
 
+        self.precise_goal_retry_count = 0
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.robot_state = "DOCK_GOALS_ACTIVE"
@@ -527,7 +845,8 @@ class AutoNavCommander(Node):
             self.get_logger().error("프론트/리어 도킹 준비 goal 전송 실패. 시퀀스를 중단합니다.")
             self._cancel_active_nav_goal()
             self._cancel_active_front_goal()
-            self.robot_state = "IDLE"
+            self.robot_state = "WAIT_PRECISE_CART_POSE"
+            self._schedule_precise_goal_retry(cart_x, cart_y, cart_yaw, source)
 
     def check_dock_goal_completion(self):
         if (
@@ -537,6 +856,46 @@ class AutoNavCommander(Node):
         ):
             self.get_logger().info("✅ 프론트/리어봇이 카트 결합 준비 위치에 모두 도착했습니다.")
             self.robot_state = "IDLE"
+
+    def _schedule_front_clear_after_detach(self):
+        if self.robot_state != "DETACHING":
+            return
+
+        delay = self.front_clear_after_detach_delay_sec
+        if delay <= 0.0:
+            self.start_front_clear_move()
+            return
+
+        self.get_logger().info(
+            "🔓 분리 상태 확인. front home 동작 안정화를 위해 "
+            f"{delay:.1f}초 후 프론트 50cm 전진을 시작합니다."
+        )
+        self._schedule_once(
+            "front_clear_start",
+            delay,
+            self.start_front_clear_move,
+        )
+
+    def _handle_detach_timeout(self):
+        if self.robot_state != "DETACHING":
+            return
+
+        self.get_logger().error(
+            "분리 명령 후 /docking_state=false를 받지 못해 시퀀스를 중단합니다. "
+            "/gripper_toggle, /front/home, frontbot_control_node 상태를 확인하세요."
+        )
+        self.robot_state = "IDLE"
+
+    def _handle_precise_pose_timeout(self):
+        if self.robot_state != "WAIT_PRECISE_CART_POSE":
+            return
+
+        self.get_logger().error(
+            "리어 heading 정렬 후 정밀 카트 pose를 제한 시간 안에 받지 못해 "
+            "시퀀스를 중단합니다. /rear/rs/cart_pose 또는 "
+            "/vision/cart_precise_pose_2d publish 상태를 확인하세요."
+        )
+        self.robot_state = "IDLE"
 
     def get_current_progress_on_path(self):
         fallback_progress = self.get_waypoint_progress(self.current_patrol_waypoint_index - 1)
@@ -561,6 +920,7 @@ class AutoNavCommander(Node):
 
     def get_robot_pose_in_map(self, frame_candidates):
         for frame_id in frame_candidates:
+            frame_id = self._normalize_frame_id(frame_id)
             try:
                 transform = self.tf_buffer.lookup_transform("map", frame_id, Time())
                 translation = transform.transform.translation
@@ -686,13 +1046,22 @@ class AutoNavCommander(Node):
 
     def _create_pose_stamped(self, x, y, yaw, frame_id="map"):
         pose = PoseStamped()
-        pose.header.frame_id = frame_id
+        pose.header.frame_id = self._normalize_frame_id(frame_id)
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = float(x)
         pose.pose.position.y = float(y)
         pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose.pose.orientation.w = math.cos(yaw / 2.0)
         return pose
+
+    def pose2d_to_map_pose(self, msg: Pose2D):
+        frame_id = self.precise_pose2d_frame
+        pose_stamped = self._create_pose_stamped(msg.x, msg.y, msg.theta, frame_id)
+        if not frame_id or frame_id == "map":
+            return pose_stamped.pose
+
+        transform = self.tf_buffer.lookup_transform("map", frame_id, Time())
+        return tf2_geometry_msgs.do_transform_pose(pose_stamped.pose, transform)
 
     def _send_nav_goal(self, msg: PoseStamped):
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
@@ -764,15 +1133,16 @@ class AutoNavCommander(Node):
             goal_handle = future.result()
         except Exception as ex:
             self.get_logger().error(f"Nav2 목표 응답 처리 중 예외 발생: {ex}")
-            self.robot_state = "IDLE"
+            self._handle_route_goal_failure("Nav2 목표 응답 예외")
             return
 
         if goal_handle is None or not goal_handle.accepted:
             self.get_logger().error("Nav2가 주행을 거부했거나 응답이 비어 있습니다.")
-            self.robot_state = "IDLE"
+            self._handle_route_goal_failure("Nav2 goal rejected")
             return
 
         self.active_nav_goal_handle = goal_handle
+        self.get_logger().info("🚀 Nav2 goal accepted.")
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
             lambda fut, seq=goal_seq: self.nav_result_callback(fut, seq)
@@ -810,7 +1180,7 @@ class AutoNavCommander(Node):
             result = future.result()
         except Exception as ex:
             self.get_logger().error(f"Nav2 결과 처리 중 예외 발생: {ex}")
-            self.robot_state = "IDLE"
+            self._handle_route_goal_failure("Nav2 결과 처리 예외")
             return
 
         if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
@@ -818,10 +1188,14 @@ class AutoNavCommander(Node):
             self.get_logger().warn(f"Nav2 주행이 성공하지 못했습니다. status={status}")
             if self.robot_state == "DOCK_GOALS_ACTIVE":
                 self._cancel_active_front_goal()
+            if self._is_route_state_active():
+                self._handle_route_goal_failure(f"Nav2 route waypoint 실패(status={status})")
+                return
             self.robot_state = "IDLE"
             return
 
         if self.robot_state in ("PATROL", "APPROACH_EXIT"):
+            self.route_goal_retry_count = 0
             if self.robot_state == "PATROL":
                 self.current_patrol_waypoint_index = max(
                     self.current_patrol_waypoint_index,
@@ -833,6 +1207,13 @@ class AutoNavCommander(Node):
         elif self.robot_state == "REAR_ALIGNING":
             self.get_logger().info("✅ 리어봇 heading 정렬 완료. 정밀 카트 pose 입력을 기다립니다.")
             self.robot_state = "WAIT_PRECISE_CART_POSE"
+            if self.precise_pose_timeout_sec > 0.0:
+                self._schedule_once(
+                    "precise_pose_timeout",
+                    self.precise_pose_timeout_sec,
+                    self._handle_precise_pose_timeout,
+                )
+            self._consume_pending_precise_cart_pose()
         elif self.robot_state == "DOCK_GOALS_ACTIVE":
             self.rear_dock_goal_done = True
             self.get_logger().info("✅ 리어봇이 카트 후방 결합 준비 위치에 도착했습니다.")
@@ -882,6 +1263,70 @@ class AutoNavCommander(Node):
         if self.active_front_goal_handle is not None:
             self.active_front_goal_handle.cancel_goal_async()
             self.active_front_goal_handle = None
+
+    def _schedule_once(self, key, delay_sec, callback):
+        self._cancel_retry(key)
+
+        def run_once():
+            self._cancel_retry(key)
+            callback()
+
+        self.pending_timers[key] = self.create_timer(delay_sec, run_once)
+
+    def _cancel_retry(self, key):
+        timer = self.pending_timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+    def _cancel_all_retries(self):
+        for key in list(self.pending_timers):
+            self._cancel_retry(key)
+
+    def _consume_pending_precise_cart_pose(self):
+        if self.robot_state != "WAIT_PRECISE_CART_POSE":
+            return
+
+        msg = self.pending_precise_cart_pose_msg
+        msg_type = self.pending_precise_cart_pose_type
+        if msg is None:
+            return
+
+        self.pending_precise_cart_pose_msg = None
+        self.pending_precise_cart_pose_type = None
+
+        self.get_logger().info("📐 대기 중 수신했던 정밀 카트 pose를 이어서 처리합니다.")
+        if msg_type == "PoseStamped":
+            self.precise_cart_pose_callback(msg)
+        elif msg_type == "Pose2D":
+            self.precise_cart_pose2d_callback(msg)
+
+    def _schedule_precise_goal_retry(self, cart_x, cart_y, cart_yaw, source):
+        if self.robot_state != "WAIT_PRECISE_CART_POSE":
+            return
+
+        self.precise_goal_retry_count += 1
+        if self.precise_goal_retry_count > self.max_state_retries:
+            self.get_logger().error("정밀 카트 pose 기반 도킹 goal 재시도 한도를 초과했습니다.")
+            self.pending_precise_cart_pose_msg = None
+            self.pending_precise_cart_pose_type = None
+            self.robot_state = "IDLE"
+            return
+
+        retry_msg = self._create_pose_stamped(cart_x, cart_y, cart_yaw, frame_id="map")
+        self.pending_precise_cart_pose_msg = retry_msg
+        self.pending_precise_cart_pose_type = "PoseStamped"
+
+        self.get_logger().warn(
+            "정밀 카트 pose 기반 도킹 goal 전송을 재시도합니다. "
+            f"source={source}, "
+            f"({self.precise_goal_retry_count}/{self.max_state_retries})"
+        )
+        self._schedule_once(
+            "precise_goal_retry",
+            0.5,
+            self._consume_pending_precise_cart_pose,
+        )
 
     def _send_parameters_to_node(self, node_name, param_dict):
         client = self.create_client(SetParameters, f"{node_name}/set_parameters")
@@ -937,9 +1382,35 @@ class AutoNavCommander(Node):
         msg.data = bool(value)
         publisher.publish(msg)
 
+    def _publish_bool_burst(self, key, publisher, value):
+        self._cancel_retry(key)
+
+        msg = Bool()
+        msg.data = bool(value)
+        publisher.publish(msg)
+
+        if self.command_burst_duration_sec <= 0.0:
+            return
+
+        start_time = self.get_clock().now()
+
+        def publish_until_done():
+            publisher.publish(msg)
+            elapsed = (self.get_clock().now() - start_time).nanoseconds * 1e-9
+            if elapsed >= self.command_burst_duration_sec:
+                self._cancel_retry(key)
+
+        self.pending_timers[key] = self.create_timer(
+            self.command_burst_period_sec,
+            publish_until_done,
+        )
+
     def enable_navigation_control(self):
-        self._publish_bool(self.rear_joy_sig_pub, False)
-        self._publish_bool(self.front_joy_sig_pub, False)
+        self._publish_bool_burst("rear_nav_control_cmd", self.rear_joy_sig_pub, False)
+        self._publish_bool_burst("front_nav_control_cmd", self.front_joy_sig_pub, False)
+
+    def _normalize_frame_id(self, frame_id):
+        return str(frame_id or "").strip().lstrip("/")
 
 
 def main(args=None):

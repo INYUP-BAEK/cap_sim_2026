@@ -12,10 +12,10 @@
     # 1. 휠 오도메트리 입력
     odom0: /front/odom_wheel        
     odom0_config: [true,  true,  false,  # x, y (위치)
-                   false, false, false,  # 롤, 피치, 요 (IMU를 믿기 위해 전부 false)
-                   true,  true,  false,  # vx, vy (선속도)
-                   false, false, false,  # 회전 속도도 IMU에 양보 (전부 false)
-                   false, false, false]  # ax, ay, az
+                  false, false, false,  # 롤, 피치, 요 (IMU를 믿기 위해 전부 false)
+                  true,  true,  false,  # vx, vy (선속도)
+                  false, false, false,  # 회전 속도도 IMU에 양보 (전부 false)
+                  false, false, false]  # ax, ay, az
 
     # 2. IMU 입력
     imu0: /front/imu 
