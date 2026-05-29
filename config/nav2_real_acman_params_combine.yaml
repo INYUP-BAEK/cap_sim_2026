@@ -226,8 +226,8 @@ controller_server:
       stateful: False
       plugin: "nav2_controller::SimpleGoalChecker"
       # [최적화] 짧은 로봇 길이에 맞춰 정밀 타격 (10cm 오차 허용)
-      xy_goal_tolerance: 0.20  
-      yaw_goal_tolerance: 0.5  
+      xy_goal_tolerance: 0.30  
+      yaw_goal_tolerance: 0.10
       
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"

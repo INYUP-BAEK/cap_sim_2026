@@ -23,6 +23,7 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
 from rclpy.time import Time
 from std_msgs.msg import Bool, Empty, String, UInt16
@@ -284,7 +285,24 @@ class AutoNavCommander(Node):
         )
 
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        tf_qos = QoSProfile(
+            depth=100,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        tf_static_qos = QoSProfile(
+            depth=100,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        self.tf_listener = tf2_ros.TransformListener(
+            self.tf_buffer,
+            self,
+            qos=tf_qos,
+            static_qos=tf_static_qos,
+        )
 
         self.topic_subs = [
             self.create_subscription(Bool, "/docking_state", self.docking_callback, 10),
@@ -733,6 +751,13 @@ class AutoNavCommander(Node):
         if self.state != State.REAR_ALIGN:
             self.set_state(State.REAR_ALIGN, "front_clear_done")
 
+        if self.pending_precise_pose_msg is not None:
+            self.get_logger().info(
+                "precise pose already available; skipping rear heading alignment."
+            )
+            self.wait_for_precise_pose()
+            return
+
         if self.detected_cart_pose is None:
             self.abort_scenario("no detected cart pose for rear alignment")
             return
@@ -781,9 +806,13 @@ class AutoNavCommander(Node):
     def precise_pose_callback(self, msg: PoseStamped):
         if self.state != State.WAIT_PRECISE_POSE:
             if self.state == State.REAR_ALIGN:
+                self.accept_precise_pose_during_rear_align("PoseStamped")
+            elif self.state == State.FRONT_CLEAR:
                 self.pending_precise_pose_msg = msg
                 self.pending_precise_pose_type = "PoseStamped"
-            return
+                return
+            else:
+                return
 
         source_frame = self.normalize_frame_id(msg.header.frame_id or "map")
         try:
@@ -806,9 +835,13 @@ class AutoNavCommander(Node):
     def precise_pose2d_callback(self, msg: Pose2D):
         if self.state != State.WAIT_PRECISE_POSE:
             if self.state == State.REAR_ALIGN:
+                self.accept_precise_pose_during_rear_align("Pose2D")
+            elif self.state == State.FRONT_CLEAR:
                 self.pending_precise_pose_msg = msg
                 self.pending_precise_pose_type = "Pose2D"
-            return
+                return
+            else:
+                return
 
         try:
             pose = self.pose2d_to_map_pose(msg)
@@ -822,6 +855,19 @@ class AutoNavCommander(Node):
             self.yaw_from_quaternion(pose.orientation),
             f"Pose2D/{self.precise_pose2d_frame or 'map'}",
         )
+
+    def accept_precise_pose_during_rear_align(self, source: str):
+        self.get_logger().info(
+            f"{source} received during rear align; starting dock prep goals now."
+        )
+        self.cancel_rear_goal()
+        self.set_state(State.WAIT_PRECISE_POSE, f"{source}_received")
+        if self.precise_pose_timeout_sec > 0.0:
+            self.schedule_once(
+                "precise_pose_timeout",
+                self.precise_pose_timeout_sec,
+                self.handle_precise_pose_timeout,
+            )
 
     def handle_precise_cart_pose(self, cart_x, cart_y, cart_yaw, source):
         if self.state != State.WAIT_PRECISE_POSE:
@@ -842,16 +888,28 @@ class AutoNavCommander(Node):
         front_goal = self.create_pose_stamped(
             cart_x + offset * math.cos(cart_yaw),
             cart_y + offset * math.sin(cart_yaw),
-            self.normalize_angle(cart_yaw + math.pi),
+            cart_yaw,
         )
 
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.publish_dock_prep_done(False)
+        self.enable_navigation_control()
         self.set_state(State.DOCK_PREP, f"precise_pose:{source}")
         self.get_logger().info(
-            "dock prep goals from cart=(%.2f, %.2f, %.2f)"
-            % (cart_x, cart_y, cart_yaw)
+            "dock prep goals from cart=(%.2f, %.2f, %.2f): "
+            "rear=(%.2f, %.2f, %.2f), front=(%.2f, %.2f, %.2f)"
+            % (
+                cart_x,
+                cart_y,
+                cart_yaw,
+                rear_goal.pose.position.x,
+                rear_goal.pose.position.y,
+                self.yaw_from_quaternion(rear_goal.pose.orientation),
+                front_goal.pose.position.x,
+                front_goal.pose.position.y,
+                self.yaw_from_quaternion(front_goal.pose.orientation),
+            )
         )
 
         rear_sent = self.send_rear_goal(rear_goal, "DOCK_PREP_REAR", self.diff_bt_path)
@@ -947,6 +1005,7 @@ class AutoNavCommander(Node):
             self.start_detach_sequence()
 
     def send_rear_goal(self, pose: PoseStamped, label: str, behavior_tree: str):
+        self.publish_bool_burst("rear_nav_control", self.rear_joy_sig_pub, False)
         if not self.rear_nav_client.wait_for_server(timeout_sec=self.nav_server_timeout_sec):
             self.get_logger().error("rear navigate_to_pose server is not ready.")
             return False
@@ -1082,6 +1141,7 @@ class AutoNavCommander(Node):
             self.handle_rear_goal_failure("rear goal rejected")
             return
 
+        self.get_logger().info(f"rear goal accepted: {self.active_rear_goal_label}")
         self.active_rear_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
@@ -1126,6 +1186,7 @@ class AutoNavCommander(Node):
             self.handle_rear_goal_failure(f"rear goal failed status={status}")
             return
 
+        self.get_logger().info(f"rear goal succeeded: {label}")
         if label in ("ROUTE_PATROL", "ROUTE_EXIT"):
             if not self.route_goal_reached_by_tf():
                 self.handle_route_failure("route waypoint TF verification failed")
@@ -1190,6 +1251,7 @@ class AutoNavCommander(Node):
         if label in ("ROUTE_PATROL", "ROUTE_EXIT"):
             self.handle_route_failure(reason)
         elif label == "REAR_ALIGN":
+            self.get_logger().warn(reason)
             self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
         elif label in ("DOCK_PREP_REAR", "MANUAL"):
             self.abort_scenario(reason)
