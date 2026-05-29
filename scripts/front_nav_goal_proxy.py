@@ -7,6 +7,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -73,6 +74,9 @@ class FrontNavGoalProxy(Node):
         self.cancel_active_goal()
 
         if not self.nav_client.wait_for_server(timeout_sec=self.server_timeout_sec):
+            self.get_logger().warn(
+                f"front Nav2 action server not ready for goal id={goal_id}"
+            )
             self.publish_result(goal_id, False, "front Nav2 action server not ready")
             return
 
@@ -84,6 +88,11 @@ class FrontNavGoalProxy(Node):
         goal_seq = self.active_goal_seq
 
         try:
+            self.get_logger().info(
+                "front goal received: "
+                f"id={goal_id}, frame={pose.header.frame_id}, "
+                f"x={pose.pose.position.x:.3f}, y={pose.pose.position.y:.3f}"
+            )
             future = self.nav_client.send_goal_async(goal_msg)
             future.add_done_callback(
                 lambda fut, seq=goal_seq, gid=goal_id: self.goal_response(fut, seq, gid)
@@ -102,6 +111,7 @@ class FrontNavGoalProxy(Node):
             return
 
         self.cancel_active_goal()
+        self.get_logger().info(f"front goal cancel requested: id={goal_id}")
         self.publish_result(goal_id, False, "front goal canceled")
 
     def goal_response(self, future, goal_seq: int, goal_id: int):
@@ -116,10 +126,12 @@ class FrontNavGoalProxy(Node):
             return
 
         if goal_handle is None or not goal_handle.accepted:
+            self.get_logger().warn(f"front goal rejected: id={goal_id}")
             self.publish_result(goal_id, False, "front goal rejected")
             self.clear_active_goal()
             return
 
+        self.get_logger().info(f"front goal accepted: id={goal_id}")
         self.active_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
@@ -138,9 +150,11 @@ class FrontNavGoalProxy(Node):
             return
 
         if result is not None and result.status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info(f"front goal succeeded: id={goal_id}")
             self.publish_result(goal_id, True, "succeeded")
         else:
             status = "None" if result is None else str(result.status)
+            self.get_logger().warn(f"front goal finished without success: id={goal_id}, {status}")
             self.publish_result(goal_id, False, f"status={status}")
 
         self.clear_active_goal()
@@ -191,11 +205,11 @@ def main(args=None):
     node = FrontNavGoalProxy()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

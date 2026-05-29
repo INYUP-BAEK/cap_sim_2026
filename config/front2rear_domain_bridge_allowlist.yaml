@@ -78,11 +78,25 @@ topics:
     from_domain: 48
     to_domain: 49
 
+  # Rear scenario_runner publishes these command topics to update front Nav2
+  # costmap footprints.
   front/global_costmap/footprint:
     type: geometry_msgs/msg/Polygon
 
   front/local_costmap/footprint:
     type: geometry_msgs/msg/Polygon
+
+  # Front Nav2 publishes these status topics. Bridge them back so rear RViz /
+  # diagnostics can see the actual front footprint.
+  front/global_costmap/published_footprint:
+    type: geometry_msgs/msg/PolygonStamped
+    from_domain: 48
+    to_domain: 49
+
+  front/local_costmap/published_footprint:
+    type: geometry_msgs/msg/PolygonStamped
+    from_domain: 48
+    to_domain: 49
 
   vision/cart_target_ground:
     type: geometry_msgs/msg/PointStamped
