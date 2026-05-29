@@ -17,7 +17,8 @@ to_domain: 48
 topics:
   tf:
     type: tf2_msgs/msg/TFMessage
-    bidirectional: true
+    from_domain: 48
+    to_domain: 49
     qos:
       reliability: best_effort
       durability: volatile
@@ -26,15 +27,8 @@ topics:
 
   tf_static:
     type: tf2_msgs/msg/TFMessage
-    bidirectional: true
-    qos:
-      reliability: reliable
-      durability: transient_local
-      history: keep_last
-      depth: 1
-
-  map:
-    type: nav_msgs/msg/OccupancyGrid
+    from_domain: 48
+    to_domain: 49
     qos:
       reliability: reliable
       durability: transient_local
@@ -49,17 +43,13 @@ topics:
 
   docking_state:
     type: std_msgs/msg/Bool
-
-  docking_target:
-    type: std_msgs/msg/Int32
+    from_domain: 48
+    to_domain: 49
 
   cmd_vel:
     type: geometry_msgs/msg/Twist
 
   cmd_vel_joy:
-    type: geometry_msgs/msg/Twist
-
-  front/cmd_vel:
     type: geometry_msgs/msg/Twist
 
   front/cmd_vel_joy:
@@ -77,49 +67,22 @@ topics:
   front/robot_docking:
     type: std_msgs/msg/Bool
 
-  front/initialpose:
-    type: geometry_msgs/msg/PoseWithCovarianceStamped
+  front/scenario_nav_goal:
+    type: std_msgs/msg/String
+
+  front/scenario_nav_cancel:
+    type: std_msgs/msg/String
+
+  front/scenario_nav_result:
+    type: std_msgs/msg/String
+    from_domain: 48
+    to_domain: 49
 
   front/global_costmap/footprint:
     type: geometry_msgs/msg/Polygon
 
   front/local_costmap/footprint:
     type: geometry_msgs/msg/Polygon
-
-  front/odom:
-    type: nav_msgs/msg/Odometry
-    from_domain: 48
-    to_domain: 49
-
-  front/odom_wheel:
-    type: nav_msgs/msg/Odometry
-    from_domain: 48
-    to_domain: 49
-
-  front/amcl_pose:
-    type: geometry_msgs/msg/PoseWithCovarianceStamped
-    from_domain: 48
-    to_domain: 49
-
-  front/rmd_state:
-    type: cartrider_rmd_sdk/msg/MotorStateArray
-    from_domain: 48
-    to_domain: 49
-
-  front/cart_pose:
-    type: geometry_msgs/msg/Pose2D
-    from_domain: 48
-    to_domain: 49
-
-  front/rs/cart_pose:
-    type: geometry_msgs/msg/Pose2D
-    from_domain: 48
-    to_domain: 49
-
-  front/rear_cart_pose:
-    type: geometry_msgs/msg/Pose2D
-    from_domain: 48
-    to_domain: 49
 
   vision/cart_target_ground:
     type: geometry_msgs/msg/PointStamped
