@@ -59,6 +59,7 @@ allowlist:
   - name: rt/front/initialpose
   - name: rt/front/global_costmap/footprint
   - name: rt/front/local_costmap/footprint
+  - name: rt/front/test_allow
 
   # Frontbot NavigateToPose action requests from rear scenario_runner
   - name: rq/front/navigate_to_pose/_action/send_goalRequest

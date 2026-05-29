@@ -328,7 +328,7 @@ local_costmap:
         camera_clear:
           sensor_frame: base_link
           data_type: PointCloud2
-          topic: /camera/depth/voxel_cloud
+          topic: /front/camera/depth/voxel_cloud
           marking: false
           clearing: true
           obstacle_range: 2.5
@@ -356,7 +356,7 @@ local_costmap:
         camera:
           sensor_frame: base_link
           data_type: PointCloud2
-          topic: /camera/depth/voxel_cloud
+          topic: /rear/camera/depth/voxel_cloud
           marking: true
           clearing: true
           obstacle_range: 2.5            

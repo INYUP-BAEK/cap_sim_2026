@@ -1,0 +1,137 @@
+name: front2rear_domain_bridge
+from_domain: 49
+to_domain: 48
+
+# ROS 2 domain_bridge uses ROS topic names and ROS interface names, not DDS
+# names. Domain 48 is frontbot and domain 49 is rearbot.
+#
+# Default direction in this file is rearbot -> frontbot. Topics published by
+# frontbot and consumed by rearbot override from_domain/to_domain below.
+#
+# Note: The ROS 2 Humble domain_bridge executable installed from apt parses
+# topic bridges from YAML. It does not expose YAML-configured action bridges, so
+# /front/navigate_to_pose is intentionally not listed here. If the rear domain
+# must send Nav2 action goals to the front domain, add a small ROS-level action
+# proxy or a custom domain_bridge executable using the C++ API.
+
+topics:
+  tf:
+    type: tf2_msgs/msg/TFMessage
+    bidirectional: true
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 100
+
+  tf_static:
+    type: tf2_msgs/msg/TFMessage
+    bidirectional: true
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+
+  map:
+    type: nav_msgs/msg/OccupancyGrid
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+
+  cart_count:
+    type: std_msgs/msg/UInt16
+
+  gripper_toggle:
+    type: std_msgs/msg/Bool
+
+  docking_state:
+    type: std_msgs/msg/Bool
+
+  docking_target:
+    type: std_msgs/msg/Int32
+
+  cmd_vel:
+    type: geometry_msgs/msg/Twist
+
+  cmd_vel_joy:
+    type: geometry_msgs/msg/Twist
+
+  front/cmd_vel:
+    type: geometry_msgs/msg/Twist
+
+  front/cmd_vel_joy:
+    type: geometry_msgs/msg/Twist
+
+  front/joy_control_sig:
+    type: std_msgs/msg/Bool
+
+  front/home:
+    type: std_msgs/msg/Bool
+
+  front/cart_docking:
+    type: std_msgs/msg/Bool
+
+  front/robot_docking:
+    type: std_msgs/msg/Bool
+
+  front/initialpose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+
+  front/global_costmap/footprint:
+    type: geometry_msgs/msg/Polygon
+
+  front/local_costmap/footprint:
+    type: geometry_msgs/msg/Polygon
+
+  front/odom:
+    type: nav_msgs/msg/Odometry
+    from_domain: 48
+    to_domain: 49
+
+  front/odom_wheel:
+    type: nav_msgs/msg/Odometry
+    from_domain: 48
+    to_domain: 49
+
+  front/amcl_pose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    from_domain: 48
+    to_domain: 49
+
+  front/rmd_state:
+    type: cartrider_rmd_sdk/msg/MotorStateArray
+    from_domain: 48
+    to_domain: 49
+
+  front/cart_pose:
+    type: geometry_msgs/msg/Pose2D
+    from_domain: 48
+    to_domain: 49
+
+  front/rs/cart_pose:
+    type: geometry_msgs/msg/Pose2D
+    from_domain: 48
+    to_domain: 49
+
+  front/rear_cart_pose:
+    type: geometry_msgs/msg/Pose2D
+    from_domain: 48
+    to_domain: 49
+
+  vision/cart_target_ground:
+    type: geometry_msgs/msg/PointStamped
+    from_domain: 48
+    to_domain: 49
+
+  vision/cart_precise_pose:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 48
+    to_domain: 49
+
+  vision/cart_precise_pose_2d:
+    type: geometry_msgs/msg/Pose2D
+    from_domain: 48
+    to_domain: 49
