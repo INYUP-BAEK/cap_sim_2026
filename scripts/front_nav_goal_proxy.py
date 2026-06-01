@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import json
+import math
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -28,22 +30,35 @@ class FrontNavGoalProxy(Node):
         self.declare_parameter("result_topic", "/front/scenario_nav_result")
         self.declare_parameter("action_name", "/front/navigate_to_pose")
         self.declare_parameter("server_timeout_sec", 2.0)
+        self.declare_parameter("clear_cmd_vel_topic", "/front/cmd_vel")
+        self.declare_parameter("clear_odom_topic", "/front/odom")
+        self.declare_parameter("clear_control_period_sec", 0.05)
 
         self.server_timeout_sec = max(
             0.1,
             float(self.get_parameter("server_timeout_sec").value),
         )
+        self.clear_control_period_sec = max(
+            0.02,
+            float(self.get_parameter("clear_control_period_sec").value),
+        )
         self.active_goal_id = None
         self.active_goal_handle = None
         self.active_goal_seq = 0
+        self.active_clear_goal = None
+        self.clear_timer = None
+        self.last_odom = None
 
         goal_topic = str(self.get_parameter("goal_topic").value)
         cancel_topic = str(self.get_parameter("cancel_topic").value)
         result_topic = str(self.get_parameter("result_topic").value)
         action_name = str(self.get_parameter("action_name").value)
+        clear_cmd_vel_topic = str(self.get_parameter("clear_cmd_vel_topic").value)
+        clear_odom_topic = str(self.get_parameter("clear_odom_topic").value)
 
         self.nav_client = ActionClient(self, NavigateToPose, action_name)
         self.result_pub = self.create_publisher(String, result_topic, 10)
+        self.clear_cmd_pub = self.create_publisher(Twist, clear_cmd_vel_topic, 10)
         self.goal_sub = self.create_subscription(
             String,
             goal_topic,
@@ -56,19 +71,35 @@ class FrontNavGoalProxy(Node):
             self.cancel_callback,
             10,
         )
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            clear_odom_topic,
+            self.odom_callback,
+            10,
+        )
 
         self.get_logger().info(
             "front nav goal proxy ready: "
-            f"{goal_topic} -> {action_name}, result={result_topic}"
+            f"{goal_topic} -> {action_name}, "
+            f"clear_cmd={clear_cmd_vel_topic}, result={result_topic}"
         )
 
     def goal_callback(self, msg: String):
         try:
             payload = json.loads(msg.data)
             goal_id = int(payload["id"])
-            pose = self.payload_to_pose(payload)
         except Exception as ex:
             self.get_logger().warn(f"invalid front proxy goal: {ex}")
+            return
+
+        if str(payload.get("command", "")).strip().lower() == "clear_forward":
+            self.start_clear_forward(goal_id, payload)
+            return
+
+        try:
+            pose = self.payload_to_pose(payload)
+        except Exception as ex:
+            self.get_logger().warn(f"invalid front proxy goal pose: {ex}")
             return
 
         self.cancel_active_goal()
@@ -113,6 +144,105 @@ class FrontNavGoalProxy(Node):
         self.cancel_active_goal()
         self.get_logger().info(f"front goal cancel requested: id={goal_id}")
         self.publish_result(goal_id, False, "front goal canceled")
+
+    def odom_callback(self, msg: Odometry):
+        self.last_odom = msg
+
+    def start_clear_forward(self, goal_id: int, payload: dict):
+        self.cancel_active_goal()
+
+        if self.last_odom is None:
+            self.get_logger().warn(
+                f"front clear rejected: odom not available for id={goal_id}"
+            )
+            self.publish_result(goal_id, False, "front odom not available")
+            return
+
+        distance = max(0.0, float(payload.get("distance", 0.5)))
+        speed = max(0.01, abs(float(payload.get("speed", 0.12))))
+        timeout_sec = max(0.5, float(payload.get("timeout_sec", 8.0)))
+        start_x, start_y = self.odom_xy()
+
+        self.active_goal_id = goal_id
+        self.active_goal_seq += 1
+        self.active_clear_goal = {
+            "id": goal_id,
+            "seq": self.active_goal_seq,
+            "start_x": start_x,
+            "start_y": start_y,
+            "distance": distance,
+            "speed": speed,
+            "deadline": self.get_clock().now().nanoseconds * 1e-9 + timeout_sec,
+        }
+
+        self.get_logger().info(
+            "front clear started: "
+            f"id={goal_id}, distance={distance:.2f}m, speed={speed:.2f}m/s"
+        )
+        self.clear_timer = self.create_timer(
+            self.clear_control_period_sec,
+            self.update_clear_forward,
+        )
+
+    def update_clear_forward(self):
+        clear_goal = self.active_clear_goal
+        if clear_goal is None:
+            self.stop_clear_timer()
+            return
+
+        if self.last_odom is None:
+            self.finish_clear_forward(False, "front odom lost")
+            return
+
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        current_x, current_y = self.odom_xy()
+        traveled = math.hypot(
+            current_x - clear_goal["start_x"],
+            current_y - clear_goal["start_y"],
+        )
+
+        if traveled >= clear_goal["distance"]:
+            self.finish_clear_forward(True, f"traveled={traveled:.3f}m")
+            return
+
+        if now_sec >= clear_goal["deadline"]:
+            self.finish_clear_forward(False, f"timeout traveled={traveled:.3f}m")
+            return
+
+        cmd = Twist()
+        cmd.linear.x = clear_goal["speed"]
+        self.clear_cmd_pub.publish(cmd)
+
+    def finish_clear_forward(self, success: bool, message: str):
+        clear_goal = self.active_clear_goal
+        if clear_goal is None:
+            return
+
+        goal_id = int(clear_goal["id"])
+        self.publish_stop()
+        self.stop_clear_timer()
+        self.active_clear_goal = None
+        self.clear_active_goal()
+
+        if success:
+            self.get_logger().info(f"front clear succeeded: id={goal_id}, {message}")
+        else:
+            self.get_logger().warn(f"front clear failed: id={goal_id}, {message}")
+        self.publish_result(goal_id, success, message)
+
+    def odom_xy(self):
+        position = self.last_odom.pose.pose.position
+        return (float(position.x), float(position.y))
+
+    def publish_stop(self):
+        stop = Twist()
+        for _ in range(3):
+            self.clear_cmd_pub.publish(stop)
+
+    def stop_clear_timer(self):
+        if self.clear_timer is not None:
+            self.clear_timer.cancel()
+            self.clear_timer = None
 
     def goal_response(self, future, goal_seq: int, goal_id: int):
         if goal_seq != self.active_goal_seq or goal_id != self.active_goal_id:
@@ -161,6 +291,10 @@ class FrontNavGoalProxy(Node):
 
     def cancel_active_goal(self):
         self.active_goal_seq += 1
+        if self.active_clear_goal is not None:
+            self.publish_stop()
+            self.stop_clear_timer()
+            self.active_clear_goal = None
         if self.active_goal_handle is not None:
             self.active_goal_handle.cancel_goal_async()
         self.clear_active_goal()

@@ -14,6 +14,7 @@ from geometry_msgs.msg import (
     Polygon,
     Pose2D,
     PoseArray,
+    PoseWithCovarianceStamped,
     PoseStamped,
 )
 from nav2_msgs.action import NavigateToPose
@@ -65,11 +66,21 @@ class AutoNavCommander(Node):
                 ("route_arrival_tolerance", 0.35),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
+                ("front_clear_speed", 0.12),
+                ("front_clear_timeout_sec", 8.0),
+                ("publish_front_initial_pose_before_clear", True),
+                ("front_initial_pose_topic", "/front/initialpose"),
+                ("front_initial_pose_source", "rear_geometry"),
+                ("front_initial_pose_rear_offset_x", 0.48),
+                ("front_initial_pose_rear_offset_y", 0.0),
+                ("front_initial_pose_yaw_offset", 0.0),
+                ("front_initial_pose_xy_covariance", 0.0004),
+                ("front_initial_pose_yaw_covariance", 0.0009),
                 ("detach_timeout_sec", 12.0),
                 ("precise_pose_timeout_sec", 12.0),
                 ("attach_timeout_sec", 180.0),
                 ("front_goal_timeout_sec", 30.0),
-                ("dock_goal_offset", 2.0),
+                ("dock_goal_offset", 1.5),
                 ("rear_final_yaw_tolerance", 0.08),
                 ("precise_pose2d_frame", "base_link"),
                 ("command_burst_duration_sec", 0.5),
@@ -127,6 +138,34 @@ class AutoNavCommander(Node):
             2.0,
         )
         self.front_clear_distance = self.param_float("front_clear_distance", 0.5)
+        self.front_clear_speed = max(0.01, self.param_float("front_clear_speed", 0.12))
+        self.front_clear_timeout_sec = self.param_float("front_clear_timeout_sec", 8.0)
+        self.publish_front_initial_pose_before_clear = bool(
+            self.get_parameter("publish_front_initial_pose_before_clear").value
+        )
+        self.front_initial_pose_topic = str(
+            self.get_parameter("front_initial_pose_topic").value
+        ).strip() or "/front/initialpose"
+        self.front_initial_pose_source = str(
+            self.get_parameter("front_initial_pose_source").value
+        ).strip()
+        self.front_initial_pose_rear_offset_x = float(
+            self.get_parameter("front_initial_pose_rear_offset_x").value
+        )
+        self.front_initial_pose_rear_offset_y = float(
+            self.get_parameter("front_initial_pose_rear_offset_y").value
+        )
+        self.front_initial_pose_yaw_offset = float(
+            self.get_parameter("front_initial_pose_yaw_offset").value
+        )
+        self.front_initial_pose_xy_covariance = max(
+            0.0,
+            float(self.get_parameter("front_initial_pose_xy_covariance").value),
+        )
+        self.front_initial_pose_yaw_covariance = max(
+            0.0,
+            float(self.get_parameter("front_initial_pose_yaw_covariance").value),
+        )
         self.detach_timeout_sec = self.param_float("detach_timeout_sec", 12.0)
         self.precise_pose_timeout_sec = self.param_float(
             "precise_pose_timeout_sec",
@@ -311,6 +350,11 @@ class AutoNavCommander(Node):
             self.cart_count_topic,
             10,
         )
+        self.front_initial_pose_pub = self.create_publisher(
+            PoseWithCovarianceStamped,
+            self.front_initial_pose_topic,
+            10,
+        )
         self.rear_joy_sig_pub = self.create_publisher(Bool, "/joy_control_sig", 10)
         self.front_joy_sig_pub = self.create_publisher(
             Bool,
@@ -378,7 +422,7 @@ class AutoNavCommander(Node):
             ),
             self.create_subscription(
                 Pose2D,
-                "/target_pose",
+                "/rear/target_pose",
                 self.precise_pose2d_callback,
                 10,
             ),
@@ -808,14 +852,14 @@ class AutoNavCommander(Node):
             self.abort_scenario("front clear requested while still attached")
             return
 
-        front_pose = self.robot_pose_in_map(("front/base_footprint", "front/base_link"))
+        front_pose = self.front_initial_pose_estimate()
         if front_pose is None:
             self.front_clear_tf_retries += 1
             if self.front_clear_tf_retries > self.state_max_retries:
-                self.abort_scenario("front TF unavailable for clear move")
+                self.abort_scenario("front pose unavailable for clear move")
                 return
             self.get_logger().warn(
-                "front TF unavailable. retry %d/%d"
+                "front clear pose unavailable. retry %d/%d"
                 % (self.front_clear_tf_retries, self.state_max_retries)
             )
             self.schedule_once(
@@ -827,17 +871,53 @@ class AutoNavCommander(Node):
 
         self.front_clear_tf_retries = 0
         x, y, yaw = front_pose
-        goal = self.create_pose_stamped(
-            x + self.front_clear_distance * math.cos(yaw),
-            y + self.front_clear_distance * math.sin(yaw),
-            yaw,
-        )
+        if self.publish_front_initial_pose_before_clear:
+            self.publish_front_initial_pose(x, y, yaw)
 
         self.get_logger().info(
-            f"sending front clear goal: {self.front_clear_distance:.2f}m forward."
+            f"sending front clear odom move: {self.front_clear_distance:.2f}m forward."
         )
-        if not self.send_front_goal(goal, "FRONT_CLEAR"):
+        if not self.send_front_clear_command():
             self.retry_or_abort("front_clear_goal_retry", self.start_front_clear_move)
+
+    def front_initial_pose_estimate(self):
+        source = self.front_initial_pose_source.lower()
+        if source == "rear_geometry":
+            rear_pose = self.robot_pose_in_map(
+                ("base_footprint", "base_link", "rear_base_link")
+            )
+            if rear_pose is None:
+                return None
+
+            rear_x, rear_y, rear_yaw = rear_pose
+            offset_x = self.front_initial_pose_rear_offset_x
+            offset_y = self.front_initial_pose_rear_offset_y
+            yaw = self.normalize_angle(
+                rear_yaw + self.front_initial_pose_yaw_offset
+            )
+            x = rear_x + offset_x * math.cos(rear_yaw) - offset_y * math.sin(rear_yaw)
+            y = rear_y + offset_x * math.sin(rear_yaw) + offset_y * math.cos(rear_yaw)
+            return (x, y, yaw)
+
+        return self.robot_pose_in_map(("front/base_footprint", "front/base_link"))
+
+    def publish_front_initial_pose(self, x: float, y: float, yaw: float):
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = "map"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        msg.pose.covariance[0] = self.front_initial_pose_xy_covariance
+        msg.pose.covariance[7] = self.front_initial_pose_xy_covariance
+        msg.pose.covariance[35] = self.front_initial_pose_yaw_covariance
+        self.front_initial_pose_pub.publish(msg)
+        self.get_logger().info(
+            "front initial pose published: "
+            f"x={x:.2f}, y={y:.2f}, yaw={yaw:.2f}, "
+            f"source={self.front_initial_pose_source}"
+        )
 
     def start_rear_heading_alignment(self):
         if self.state != State.REAR_ALIGN:
@@ -1184,6 +1264,44 @@ class AutoNavCommander(Node):
             self.active_front_goal_pending = False
             self.get_logger().error(f"front goal send exception: {ex}")
             return False
+        self.schedule_front_goal_timeout()
+        return True
+
+    def send_front_clear_command(self):
+        if self.front_nav_transport != "topic_proxy":
+            self.get_logger().error(
+                "front clear odom move requires front_nav_transport=topic_proxy."
+            )
+            return False
+
+        self.publish_bool_once(self.front_joy_sig_pub, False)
+        self.active_front_goal_seq += 1
+        goal_id = self.active_front_goal_seq
+        self.active_front_proxy_goal_id = goal_id
+        self.active_front_goal_pending = True
+        self.active_front_goal_label = "FRONT_CLEAR"
+
+        timeout_sec = self.front_clear_timeout_sec
+        if timeout_sec <= 0.0:
+            timeout_sec = max(3.0, self.front_clear_distance / self.front_clear_speed + 3.0)
+
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "id": goal_id,
+                "label": "FRONT_CLEAR",
+                "command": "clear_forward",
+                "distance": float(self.front_clear_distance),
+                "speed": float(self.front_clear_speed),
+                "timeout_sec": float(timeout_sec),
+            }
+        )
+        self.front_nav_goal_pub.publish(msg)
+        self.get_logger().info(
+            "front clear command published: "
+            f"id={goal_id}, distance={self.front_clear_distance:.2f}, "
+            f"speed={self.front_clear_speed:.2f}"
+        )
         self.schedule_front_goal_timeout()
         return True
 
@@ -1882,7 +2000,13 @@ class AutoNavCommander(Node):
 
     def pose2d_to_map_pose(self, msg: Pose2D):
         frame_id = self.precise_pose2d_frame
-        pose_stamped = self.create_pose_stamped(msg.x, msg.y, msg.theta, frame_id)
+        cart_yaw_in_frame = self.normalize_angle(-float(msg.theta))
+        pose_stamped = self.create_pose_stamped(
+            msg.x,
+            msg.y,
+            cart_yaw_in_frame,
+            frame_id,
+        )
         if not frame_id or frame_id == "map":
             return pose_stamped.pose
 
