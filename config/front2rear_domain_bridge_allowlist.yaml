@@ -52,6 +52,9 @@ topics:
   cmd_vel_joy:
     type: geometry_msgs/msg/Twist
 
+  front/cmd_vel:
+    type: geometry_msgs/msg/Twist
+
   front/cmd_vel_joy:
     type: geometry_msgs/msg/Twist
 
@@ -66,6 +69,9 @@ topics:
 
   front/robot_docking:
     type: std_msgs/msg/Bool
+
+  front/initialpose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
 
   front/scenario_nav_goal:
     type: std_msgs/msg/String

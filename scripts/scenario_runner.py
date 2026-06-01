@@ -83,6 +83,8 @@ class AutoNavCommander(Node):
                 ("dock_goal_offset", 1.5),
                 ("rear_final_yaw_tolerance", 0.08),
                 ("precise_pose2d_frame", "base_link"),
+                ("cart_marker_front_back_offset_m", 0.30),
+                ("cart_marker_left_right_offset_m", 0.18),
                 ("command_burst_duration_sec", 0.5),
                 ("command_burst_period_sec", 0.1),
                 ("release_to_joystick_on_wait_attach", True),
@@ -97,7 +99,8 @@ class AutoNavCommander(Node):
                 ("cart_count_topic", "/cart_count"),
                 ("cart_count_after_docking", 1),
                 ("manage_rear_nav2_lifecycle", True),
-                ("pause_rear_nav2_on_dock_prep_done", True),
+                # Temporarily keep rear Nav2 active after both dock-prep goals finish.
+                ("pause_rear_nav2_on_dock_prep_done", False),
                 ("resume_rear_nav2_on_scenario_start", True),
                 (
                     "rear_nav2_lifecycle_service",
@@ -180,6 +183,14 @@ class AutoNavCommander(Node):
         )
         self.precise_pose2d_frame = self.normalize_frame_id(
             self.get_parameter("precise_pose2d_frame").value
+        )
+        self.cart_marker_front_back_offset_m = max(
+            0.0,
+            self.param_float("cart_marker_front_back_offset_m", 0.30),
+        )
+        self.cart_marker_left_right_offset_m = max(
+            0.0,
+            self.param_float("cart_marker_left_right_offset_m", 0.18),
         )
         self.command_burst_duration_sec = self.param_float(
             "command_burst_duration_sec",
@@ -404,7 +415,7 @@ class AutoNavCommander(Node):
             ),
             self.create_subscription(
                 PointStamped,
-                "/nav_goal_topic",
+                "/zed_yolo/global_cart_target",
                 self.cart_target_callback,
                 10,
             ),
@@ -421,9 +432,9 @@ class AutoNavCommander(Node):
                 10,
             ),
             self.create_subscription(
-                Pose2D,
+                PointStamped,
                 "/rear/target_pose",
-                self.precise_pose2d_callback,
+                self.precise_target_point_callback,
                 10,
             ),
             self.create_subscription(
@@ -1036,6 +1047,59 @@ class AutoNavCommander(Node):
             pose.position.y,
             self.yaw_from_quaternion(pose.orientation),
             f"Pose2D/{self.precise_pose2d_frame or 'map'}",
+        )
+
+    def precise_target_point_callback(self, msg: PointStamped):
+        if self.state != State.WAIT_PRECISE_POSE:
+            if self.state == State.REAR_ALIGN:
+                self.accept_precise_pose_during_rear_align("PointStamped")
+            elif self.state == State.FRONT_CLEAR:
+                self.pending_precise_pose_msg = msg
+                self.pending_precise_pose_type = "PointStamped"
+                return
+            else:
+                return
+
+        try:
+            pose = self.target_point_to_map_pose(msg)
+        except tf2_ros.TransformException as ex:
+            self.get_logger().warn(f"precise PointStamped TF failed: {ex}")
+            return
+
+        marker_x = pose.position.x
+        marker_y = pose.position.y
+        cart_yaw = self.yaw_from_quaternion(pose.orientation)
+        aruco_id = self.parse_aruco_id(msg.header.frame_id)
+        cart_x, cart_y, offset_applied = self.cart_center_from_aruco_marker(
+            marker_x,
+            marker_y,
+            cart_yaw,
+            aruco_id,
+        )
+        aruco_label = f"aruco_{aruco_id}" if aruco_id is not None else "aruco_unknown"
+        if offset_applied:
+            self.get_logger().info(
+                "cart center offset from %s marker=(%.2f, %.2f, %.2f) -> "
+                "center=(%.2f, %.2f)"
+                % (
+                    aruco_label,
+                    marker_x,
+                    marker_y,
+                    cart_yaw,
+                    cart_x,
+                    cart_y,
+                )
+            )
+        else:
+            self.get_logger().warn(
+                f"no cart-center offset for {aruco_label}; using marker point as cart center."
+            )
+
+        self.handle_precise_cart_pose(
+            cart_x,
+            cart_y,
+            cart_yaw,
+            f"PointStamped/{self.precise_pose2d_frame or 'map'}/{aruco_label}",
         )
 
     def accept_precise_pose_during_rear_align(self, source: str):
@@ -2013,6 +2077,53 @@ class AutoNavCommander(Node):
         transform = self.tf_buffer.lookup_transform("map", frame_id, Time())
         return tf2_geometry_msgs.do_transform_pose(pose_stamped.pose, transform)
 
+    def target_point_to_map_pose(self, msg: PointStamped):
+        frame_id = self.precise_pose2d_frame
+        cart_yaw_in_frame = self.normalize_angle(-float(msg.point.z))
+        pose_stamped = self.create_pose_stamped(
+            msg.point.x,
+            msg.point.y,
+            cart_yaw_in_frame,
+            frame_id,
+        )
+        if not frame_id or frame_id == "map":
+            return pose_stamped.pose
+
+        transform = self.tf_buffer.lookup_transform("map", frame_id, Time())
+        return tf2_geometry_msgs.do_transform_pose(pose_stamped.pose, transform)
+
+    def parse_aruco_id(self, frame_id):
+        value = str(frame_id or "").strip()
+        if not value:
+            return None
+
+        token = value.rsplit("/", 1)[-1]
+        if token.startswith("aruco_"):
+            token = token[len("aruco_") :]
+
+        try:
+            return int(token)
+        except ValueError:
+            return None
+
+    def cart_center_from_aruco_marker(self, marker_x, marker_y, cart_yaw, aruco_id):
+        front_back = self.cart_marker_front_back_offset_m
+        left_right = self.cart_marker_left_right_offset_m
+        marker_offsets = {
+            0: (front_back, 0.0),
+            1: (-front_back, 0.0),
+            2: (0.0, left_right),
+            3: (0.0, -left_right),
+        }
+
+        if aruco_id not in marker_offsets:
+            return marker_x, marker_y, False
+
+        marker_dx, marker_dy = marker_offsets[aruco_id]
+        offset_x = marker_dx * math.cos(cart_yaw) - marker_dy * math.sin(cart_yaw)
+        offset_y = marker_dx * math.sin(cart_yaw) + marker_dy * math.cos(cart_yaw)
+        return marker_x - offset_x, marker_y - offset_y, True
+
     def consume_pending_precise_pose(self):
         msg = self.pending_precise_pose_msg
         msg_type = self.pending_precise_pose_type
@@ -2027,6 +2138,8 @@ class AutoNavCommander(Node):
             self.precise_pose_callback(msg)
         elif msg_type == "Pose2D":
             self.precise_pose2d_callback(msg)
+        elif msg_type == "PointStamped":
+            self.precise_target_point_callback(msg)
 
     def clear_precise_pose(self):
         self.pending_precise_pose_msg = None
