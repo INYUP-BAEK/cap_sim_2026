@@ -15,7 +15,6 @@ from geometry_msgs.msg import (
     Pose2D,
     PoseArray,
     PoseStamped,
-    Twist,
 )
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
@@ -68,9 +67,10 @@ class AutoNavCommander(Node):
                 ("front_clear_distance", 0.5),
                 ("detach_timeout_sec", 12.0),
                 ("precise_pose_timeout_sec", 12.0),
-                ("attach_timeout_sec", 60.0),
+                ("attach_timeout_sec", 180.0),
                 ("front_goal_timeout_sec", 30.0),
-                ("dock_goal_offset", 1.0),
+                ("dock_goal_offset", 2.0),
+                ("rear_final_yaw_tolerance", 0.08),
                 ("precise_pose2d_frame", "base_link"),
                 ("command_burst_duration_sec", 0.5),
                 ("command_burst_period_sec", 0.1),
@@ -81,13 +81,10 @@ class AutoNavCommander(Node):
                 ("front_nav_cancel_topic", "/front/scenario_nav_cancel"),
                 ("front_nav_result_topic", "/front/scenario_nav_result"),
                 ("dock_prep_done_topic", "/dock_prep_done"),
-                ("rear_align_use_cmd_vel", True),
-                ("rear_align_cmd_vel_topic", "/cmd_vel"),
-                ("rear_align_period_sec", 0.05),
-                ("rear_align_yaw_tolerance", 0.08),
-                ("rear_align_angular_speed", 0.35),
-                ("rear_align_min_angular_speed", 0.10),
-                ("rear_align_timeout_sec", 12.0),
+                ("rl_docking_ready_topic", "/rl_docking_ready"),
+                ("rl_docking_done_topic", "/rl_docking_done"),
+                ("cart_count_topic", "/cart_count"),
+                ("cart_count_after_docking", 1),
                 ("manage_rear_nav2_lifecycle", True),
                 ("pause_rear_nav2_on_dock_prep_done", True),
                 ("resume_rear_nav2_on_scenario_start", True),
@@ -135,9 +132,13 @@ class AutoNavCommander(Node):
             "precise_pose_timeout_sec",
             12.0,
         )
-        self.attach_timeout_sec = self.param_float("attach_timeout_sec", 60.0)
+        self.attach_timeout_sec = self.param_float("attach_timeout_sec", 180.0)
         self.front_goal_timeout_sec = self.param_float("front_goal_timeout_sec", 30.0)
-        self.dock_goal_offset = self.param_float("dock_goal_offset", 1.0)
+        self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
+        self.rear_final_yaw_tolerance = max(
+            0.01,
+            self.param_float("rear_final_yaw_tolerance", 0.08),
+        )
         self.precise_pose2d_frame = self.normalize_frame_id(
             self.get_parameter("precise_pose2d_frame").value
         )
@@ -170,31 +171,18 @@ class AutoNavCommander(Node):
         self.dock_prep_done_topic = str(
             self.get_parameter("dock_prep_done_topic").value
         ).strip()
-        self.rear_align_use_cmd_vel = bool(
-            self.get_parameter("rear_align_use_cmd_vel").value
-        )
-        self.rear_align_cmd_vel_topic = str(
-            self.get_parameter("rear_align_cmd_vel_topic").value
-        ).strip() or "/cmd_vel"
-        self.rear_align_period_sec = max(
-            0.02,
-            self.param_float("rear_align_period_sec", 0.05),
-        )
-        self.rear_align_yaw_tolerance = max(
-            0.01,
-            self.param_float("rear_align_yaw_tolerance", 0.08),
-        )
-        self.rear_align_angular_speed = max(
-            0.05,
-            self.param_float("rear_align_angular_speed", 0.35),
-        )
-        self.rear_align_min_angular_speed = max(
-            0.0,
-            self.param_float("rear_align_min_angular_speed", 0.10),
-        )
-        self.rear_align_timeout_sec = max(
-            0.0,
-            self.param_float("rear_align_timeout_sec", 12.0),
+        self.rl_docking_ready_topic = str(
+            self.get_parameter("rl_docking_ready_topic").value
+        ).strip()
+        self.rl_docking_done_topic = str(
+            self.get_parameter("rl_docking_done_topic").value
+        ).strip()
+        self.cart_count_topic = str(
+            self.get_parameter("cart_count_topic").value
+        ).strip() or "/cart_count"
+        self.cart_count_after_docking = max(
+            1,
+            self.param_int("cart_count_after_docking", 1),
         )
         self.manage_rear_nav2_lifecycle = bool(
             self.get_parameter("manage_rear_nav2_lifecycle").value
@@ -259,6 +247,7 @@ class AutoNavCommander(Node):
         self.detected_cart_pose = None
         self.pending_precise_pose_msg = None
         self.pending_precise_pose_type = None
+        self.last_dock_prep_rear_goal = None
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.last_cart_goal_time = None
@@ -266,8 +255,7 @@ class AutoNavCommander(Node):
         self.front_clear_goal_retry_count = 0
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
-        self.rear_align_start_time = None
-        self.rear_align_last_warn_sec = None
+        self.dock_prep_rear_goal_retry_count = 0
         self.precise_goal_retries = 0
         self.scenario_timers = {}
 
@@ -313,9 +301,14 @@ class AutoNavCommander(Node):
             self.dock_prep_done_topic,
             10,
         )
-        self.rear_cmd_vel_pub = self.create_publisher(
-            Twist,
-            self.rear_align_cmd_vel_topic,
+        self.rl_docking_ready_pub = self.create_publisher(
+            Bool,
+            self.rl_docking_ready_topic,
+            10,
+        )
+        self.cart_count_pub = self.create_publisher(
+            UInt16,
+            self.cart_count_topic,
             10,
         )
         self.rear_joy_sig_pub = self.create_publisher(Bool, "/joy_control_sig", 10)
@@ -347,7 +340,18 @@ class AutoNavCommander(Node):
 
         self.topic_subs = [
             self.create_subscription(Bool, "/docking_state", self.docking_callback, 10),
-            self.create_subscription(UInt16, "/cart_count", self.cart_count_callback, 10),
+            self.create_subscription(
+                Bool,
+                self.rl_docking_done_topic,
+                self.rl_docking_done_callback,
+                10,
+            ),
+            self.create_subscription(
+                UInt16,
+                self.cart_count_topic,
+                self.cart_count_callback,
+                10,
+            ),
             self.create_subscription(
                 PoseStamped,
                 "/mission_goal",
@@ -356,7 +360,7 @@ class AutoNavCommander(Node):
             ),
             self.create_subscription(
                 PointStamped,
-                "/vision/cart_target_ground",
+                "/nav_goal_topic",
                 self.cart_target_callback,
                 10,
             ),
@@ -374,7 +378,7 @@ class AutoNavCommander(Node):
             ),
             self.create_subscription(
                 Pose2D,
-                "/rear/rs/cart_pose",
+                "/target_pose",
                 self.precise_pose2d_callback,
                 10,
             ),
@@ -390,7 +394,9 @@ class AutoNavCommander(Node):
                 self.start_mission_callback,
                 10,
             ),
-            self.create_subscription(Path, "/mission_path", self.mission_path_callback, 10),
+            self.create_subscription(
+                Path, "/mission_path", self.mission_path_callback, 10
+            ),
             self.create_subscription(
                 PoseArray,
                 "/mission_waypoints",
@@ -403,6 +409,7 @@ class AutoNavCommander(Node):
         self.footprint_timer = self.create_timer(period, self.publish_footprints)
 
         self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
         self.update_dynamic_state("initial")
         self.get_logger().info(
             "Scenario runner ready. state sync is always active, auto_scenario=%s"
@@ -428,9 +435,42 @@ class AutoNavCommander(Node):
             self.publish_footprints()
             return
 
-        self.cart_count = int(msg.data)
-        self.get_logger().info(f"cart_count -> {self.cart_count}")
-        self.update_dynamic_state("cart_count")
+        self.set_cart_count(int(msg.data), "cart_count", publish=False)
+
+    def rl_docking_done_callback(self, msg: Bool):
+        if not bool(msg.data):
+            return
+
+        if self.state != State.WAIT_ATTACH:
+            self.get_logger().warn(
+                f"rl docking done ignored because scenario state={self.state.value}"
+            )
+            return
+
+        self.cancel_timer("attach_timeout")
+        if not self.is_attached:
+            self.is_attached = True
+            self.get_logger().info("rl_docking_done -> attached=True")
+        self.set_cart_count(
+            self.cart_count_after_docking,
+            "rl_docking_done",
+            publish=True,
+        )
+        self.complete_scenario("rl_docking_done")
+
+    def set_cart_count(self, count: int, reason: str, publish: bool):
+        next_count = max(0, int(count))
+        changed = self.cart_count != next_count
+        self.cart_count = next_count
+
+        if publish:
+            self.publish_cart_count(self.cart_count)
+
+        if changed:
+            self.get_logger().info(f"cart_count -> {self.cart_count} ({reason})")
+            self.update_dynamic_state(reason)
+        else:
+            self.publish_footprints()
 
     def update_dynamic_state(self, reason: str):
         self.publish_footprints()
@@ -463,10 +503,10 @@ class AutoNavCommander(Node):
 
         return (
             {
-                "max_velocity": [0.35, 0.0, 1.0],
-                "min_velocity": [-0.35, 0.0, -1.0],
-                "max_accel": [0.5, 0.0, 1.5],
-                "max_decel": [-0.5, 0.0, -1.5],
+                "max_velocity": [0.35, 0.0, 1.2],
+                "min_velocity": [-0.35, 0.0, -1.2],
+                "max_accel": [0.5, 0.0, 6.0],
+                "max_decel": [-0.5, 0.0, -6.0],
             },
             "differential detached mode",
         )
@@ -692,8 +732,7 @@ class AutoNavCommander(Node):
         self.front_clear_goal_retry_count = 0
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
-        self.rear_align_start_time = None
-        self.rear_align_last_warn_sec = None
+        self.dock_prep_rear_goal_retry_count = 0
         self.precise_goal_retries = 0
 
         if not self.is_attached:
@@ -725,6 +764,11 @@ class AutoNavCommander(Node):
 
         if self.state == State.WAIT_ATTACH and attached:
             self.cancel_timer("attach_timeout")
+            self.set_cart_count(
+                self.cart_count_after_docking,
+                "docking_state_attached",
+                publish=True,
+            )
             self.complete_scenario("attached")
             return
 
@@ -736,6 +780,11 @@ class AutoNavCommander(Node):
         ):
             self.get_logger().warn(
                 f"docking_state=true during {self.state.value}; finishing scenario early."
+            )
+            self.set_cart_count(
+                self.cart_count_after_docking,
+                "manual_attach",
+                publish=True,
             )
             self.complete_scenario("manual attach")
             return
@@ -822,127 +871,31 @@ class AutoNavCommander(Node):
             )
             return
 
-        if self.rear_align_use_cmd_vel:
-            self.start_rear_cmd_vel_heading_alignment()
-            return
-
         self.rear_align_tf_retries = 0
-        rear_x, rear_y, _ = rear_pose
-        cart_x = self.detected_cart_pose.pose.position.x
-        cart_y = self.detected_cart_pose.pose.position.y
-        yaw_to_cart = math.atan2(cart_y - rear_y, cart_x - rear_x)
-        goal = self.create_pose_stamped(rear_x, rear_y, yaw_to_cart)
-
-        self.get_logger().info("sending rear heading alignment goal.")
-        if not self.send_rear_goal(goal, "REAR_ALIGN", self.current_behavior_tree()):
-            self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
-
-    def start_rear_cmd_vel_heading_alignment(self):
-        self.cancel_timer("rear_align_cmd_vel")
-        self.cancel_rear_goal()
-        self.enable_navigation_control()
-        self.rear_align_tf_retries = 0
-        self.rear_align_start_time = self.get_clock().now()
-        self.rear_align_last_warn_sec = None
-        self.get_logger().info(
-            "starting rear cmd_vel heading alignment toward detected cart."
-        )
-        self.scenario_timers["rear_align_cmd_vel"] = self.create_timer(
-            self.rear_align_period_sec,
-            self.rear_cmd_vel_heading_alignment_step,
-        )
-        self.rear_cmd_vel_heading_alignment_step()
-
-    def rear_cmd_vel_heading_alignment_step(self):
-        if self.state != State.REAR_ALIGN:
-            self.cancel_timer("rear_align_cmd_vel")
-            self.stop_rear_cmd_vel()
-            return
-
-        if self.pending_precise_pose_msg is not None:
-            self.cancel_timer("rear_align_cmd_vel")
-            self.stop_rear_cmd_vel()
-            self.wait_for_precise_pose()
-            return
-
-        if self.detected_cart_pose is None:
-            self.cancel_timer("rear_align_cmd_vel")
-            self.stop_rear_cmd_vel()
-            self.abort_scenario("no detected cart pose for rear cmd_vel alignment")
-            return
-
-        elapsed = 0.0
-        if self.rear_align_start_time is not None:
-            elapsed = (
-                self.get_clock().now() - self.rear_align_start_time
-            ).nanoseconds * 1e-9
-
-        rear_pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
-        if rear_pose is None:
-            self.publish_rear_cmd_vel(0.0, 0.0)
-            self.warn_rear_align_throttled("rear TF unavailable during cmd_vel alignment.")
-            if self.rear_align_timeout_sec > 0.0 and elapsed >= self.rear_align_timeout_sec:
-                self.cancel_timer("rear_align_cmd_vel")
-                self.stop_rear_cmd_vel()
-                self.abort_scenario("rear TF unavailable during heading alignment")
-            return
-
         rear_x, rear_y, rear_yaw = rear_pose
         cart_x = self.detected_cart_pose.pose.position.x
         cart_y = self.detected_cart_pose.pose.position.y
         yaw_to_cart = math.atan2(cart_y - rear_y, cart_x - rear_x)
         yaw_error = self.normalize_angle(yaw_to_cart - rear_yaw)
 
-        if abs(yaw_error) <= self.rear_align_yaw_tolerance:
-            self.cancel_timer("rear_align_cmd_vel")
-            self.stop_rear_cmd_vel()
+        if abs(yaw_error) <= self.rear_final_yaw_tolerance:
             self.get_logger().info(
-                "rear heading aligned by cmd_vel: error=%.3frad" % yaw_error
+                "rear heading already aligned: yaw_error=%.3f rad." % yaw_error
             )
             self.wait_for_precise_pose()
             return
 
-        if self.rear_align_timeout_sec > 0.0 and elapsed >= self.rear_align_timeout_sec:
-            self.cancel_timer("rear_align_cmd_vel")
-            self.stop_rear_cmd_vel()
-            self.get_logger().warn(
-                "rear heading alignment timeout: "
-                "error=%.3frad. Continuing to precise pose wait." % yaw_error
-            )
-            self.wait_for_precise_pose()
-            return
-
-        angular_speed = min(
-            self.rear_align_angular_speed,
-            max(self.rear_align_min_angular_speed, abs(yaw_error) * 0.8),
+        goal = self.create_pose_stamped(rear_x, rear_y, yaw_to_cart)
+        self.get_logger().info(
+            "sending rear heading goal: yaw_delta=%.3f rad." % yaw_error
         )
-        self.publish_rear_cmd_vel(0.0, math.copysign(angular_speed, yaw_error))
-
-    def warn_rear_align_throttled(self, message: str):
-        now_sec = self.get_clock().now().nanoseconds * 1e-9
-        if (
-            self.rear_align_last_warn_sec is None
-            or now_sec - self.rear_align_last_warn_sec >= 1.0
-        ):
-            self.rear_align_last_warn_sec = now_sec
-            self.get_logger().warn(message)
-
-    def publish_rear_cmd_vel(self, linear_x: float, angular_z: float):
-        msg = Twist()
-        msg.linear.x = float(linear_x)
-        msg.angular.z = float(angular_z)
-        self.rear_cmd_vel_pub.publish(msg)
-
-    def stop_rear_cmd_vel(self):
-        for _ in range(3):
-            self.publish_rear_cmd_vel(0.0, 0.0)
+        if not self.send_rear_goal(goal, "REAR_ALIGN", self.diff_bt_path):
+            self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
 
     def wait_for_precise_pose(self):
         if self.state != State.REAR_ALIGN:
             return
 
-        self.cancel_timer("rear_align_cmd_vel")
-        self.stop_rear_cmd_vel()
         self.set_state(State.WAIT_PRECISE_POSE, "rear_align_done")
         if self.precise_pose_timeout_sec > 0.0:
             self.schedule_once(
@@ -1009,9 +962,6 @@ class AutoNavCommander(Node):
         self.get_logger().info(
             f"{source} received during rear align; starting dock prep goals now."
         )
-        self.cancel_timer("rear_align_cmd_vel")
-        self.stop_rear_cmd_vel()
-        self.cancel_rear_goal()
         self.set_state(State.WAIT_PRECISE_POSE, f"{source}_received")
         if self.precise_pose_timeout_sec > 0.0:
             self.schedule_once(
@@ -1030,26 +980,33 @@ class AutoNavCommander(Node):
         self.cancel_timer("precise_pose_timeout")
         cart_yaw = self.normalize_angle(cart_yaw)
         offset = self.dock_goal_offset
+        rear_x = cart_x - offset * math.cos(cart_yaw)
+        rear_y = cart_y - offset * math.sin(cart_yaw)
+        front_x = cart_x + offset * math.cos(cart_yaw)
+        front_y = cart_y + offset * math.sin(cart_yaw)
 
         rear_goal = self.create_pose_stamped(
-            cart_x - offset * math.cos(cart_yaw),
-            cart_y - offset * math.sin(cart_yaw),
+            rear_x,
+            rear_y,
             cart_yaw,
         )
         front_goal = self.create_pose_stamped(
-            cart_x + offset * math.cos(cart_yaw),
-            cart_y + offset * math.sin(cart_yaw),
+            front_x,
+            front_y,
             cart_yaw,
         )
 
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
+        self.dock_prep_rear_goal_retry_count = 0
+        self.last_dock_prep_rear_goal = rear_goal
         self.publish_dock_prep_done(False)
         self.enable_navigation_control()
         self.set_state(State.DOCK_PREP, f"precise_pose:{source}")
         self.get_logger().info(
             "dock prep goals from cart=(%.2f, %.2f, %.2f): "
-            "rear=(%.2f, %.2f, %.2f), front=(%.2f, %.2f, %.2f)"
+            "rear=(%.2f, %.2f, %.2f), "
+            "front=(%.2f, %.2f, %.2f)"
             % (
                 cart_x,
                 cart_y,
@@ -1063,10 +1020,28 @@ class AutoNavCommander(Node):
             )
         )
 
-        rear_sent = self.send_rear_goal(rear_goal, "DOCK_PREP_REAR", self.diff_bt_path)
+        rear_sent = self.send_rear_goal(
+            rear_goal,
+            "DOCK_PREP_REAR",
+            self.diff_bt_path,
+        )
         front_sent = self.send_front_goal(front_goal, "DOCK_PREP_FRONT")
         if not rear_sent or not front_sent:
             self.abort_scenario("failed to send dock prep goals")
+
+    def retry_dock_prep_rear_goal(self):
+        if self.state != State.DOCK_PREP:
+            return
+        if self.last_dock_prep_rear_goal is None:
+            self.abort_scenario("no rear dock prep goal to retry")
+            return
+        self.get_logger().info("retrying rear dock prep goal.")
+        if not self.send_rear_goal(
+            self.last_dock_prep_rear_goal,
+            "DOCK_PREP_REAR",
+            self.diff_bt_path,
+        ):
+            self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
 
     def enter_wait_attach(self):
         self.clear_precise_pose()
@@ -1100,7 +1075,7 @@ class AutoNavCommander(Node):
             )
 
         self.get_logger().info(
-            "dock prep complete. Waiting for joystick/controller to publish "
+            "dock prep complete. Waiting for RL docking done or "
             "/docking_state=true."
         )
 
@@ -1156,7 +1131,8 @@ class AutoNavCommander(Node):
             self.start_detach_sequence()
 
     def send_rear_goal(self, pose: PoseStamped, label: str, behavior_tree: str):
-        self.publish_bool_burst("rear_nav_control", self.rear_joy_sig_pub, False)
+        self.cancel_timer("rear_nav_control")
+        self.publish_bool_once(self.rear_joy_sig_pub, False)
         if not self.rear_nav_client.wait_for_server(timeout_sec=self.nav_server_timeout_sec):
             self.get_logger().error("rear navigate_to_pose server is not ready.")
             return False
@@ -1392,6 +1368,7 @@ class AutoNavCommander(Node):
             and self.front_dock_goal_done
         ):
             self.publish_dock_prep_done(True)
+            self.publish_rl_docking_ready(True)
             self.enter_wait_attach()
 
     def handle_rear_goal_failure(self, reason):
@@ -1404,7 +1381,10 @@ class AutoNavCommander(Node):
         elif label == "REAR_ALIGN":
             self.get_logger().warn(reason)
             self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
-        elif label in ("DOCK_PREP_REAR", "MANUAL"):
+        elif label == "DOCK_PREP_REAR":
+            self.get_logger().warn(reason)
+            self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
+        elif label == "MANUAL":
             self.abort_scenario(reason)
         else:
             self.get_logger().warn(reason)
@@ -1488,7 +1468,9 @@ class AutoNavCommander(Node):
 
     def handle_attach_timeout(self):
         if self.state == State.WAIT_ATTACH:
-            self.abort_scenario("attach timeout waiting for docking_state=true")
+            self.abort_scenario(
+                "attach timeout waiting for rl_docking_done or docking_state=true"
+            )
 
     def complete_scenario(self, reason):
         self.get_logger().info(f"scenario complete: {reason}")
@@ -1497,8 +1479,8 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
-        self.stop_rear_cmd_vel()
         self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
         self.update_dynamic_state("scenario_complete")
         self.enable_joystick_control()
         self.set_state(State.IDLE, reason)
@@ -1510,8 +1492,8 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
-        self.stop_rear_cmd_vel()
         self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
         if return_joystick:
             self.enable_joystick_control()
         self.set_state(State.IDLE, "abort")
@@ -1571,11 +1553,20 @@ class AutoNavCommander(Node):
             republish,
         )
 
+    def publish_bool_once(self, publisher, value):
+        msg = Bool()
+        msg.data = bool(value)
+        publisher.publish(msg)
+
     def enable_navigation_control(self):
-        self.publish_bool_burst("rear_nav_control", self.rear_joy_sig_pub, False)
-        self.publish_bool_burst("front_nav_control", self.front_joy_sig_pub, False)
+        self.cancel_timer("navigation_control_hold")
+        self.cancel_timer("rear_nav_control")
+        self.cancel_timer("front_nav_control")
+        self.publish_bool_once(self.rear_joy_sig_pub, False)
+        self.publish_bool_once(self.front_joy_sig_pub, False)
 
     def enable_joystick_control(self):
+        self.cancel_timer("navigation_control_hold")
         self.publish_bool_burst("rear_joy_control", self.rear_joy_sig_pub, True)
         self.publish_bool_burst("front_joy_control", self.front_joy_sig_pub, True)
 
@@ -1609,6 +1600,16 @@ class AutoNavCommander(Node):
         msg = Bool()
         msg.data = bool(done)
         self.dock_prep_done_pub.publish(msg)
+
+    def publish_rl_docking_ready(self, ready: bool):
+        msg = Bool()
+        msg.data = bool(ready)
+        self.rl_docking_ready_pub.publish(msg)
+
+    def publish_cart_count(self, count: int):
+        msg = UInt16()
+        msg.data = max(0, int(count))
+        self.cart_count_pub.publish(msg)
 
     def pause_rear_nav2(self, reason: str):
         self.call_rear_nav2_lifecycle(
@@ -1906,6 +1907,7 @@ class AutoNavCommander(Node):
     def clear_precise_pose(self):
         self.pending_precise_pose_msg = None
         self.pending_precise_pose_type = None
+        self.last_dock_prep_rear_goal = None
         self.cancel_timer("precise_pose_timeout")
 
     def cart_stop_distance(self):
