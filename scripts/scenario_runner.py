@@ -84,6 +84,7 @@ class AutoNavCommander(Node):
                 ("front_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_distance", 0.8),
                 ("scenario2_front_wait_clear_timeout_sec", 0.0),
+                ("scenario2_rear_cart_rejoin_back_distance", 1.0),
                 ("front_clear_speed", 0.12),
                 ("front_clear_timeout_sec", 8.0),
                 ("publish_front_initial_pose_before_clear", True),
@@ -225,6 +226,10 @@ class AutoNavCommander(Node):
         self.scenario2_front_wait_clear_timeout_sec = self.param_float(
             "scenario2_front_wait_clear_timeout_sec",
             0.0,
+        )
+        self.scenario2_rear_cart_rejoin_back_distance = max(
+            0.0,
+            self.param_float("scenario2_rear_cart_rejoin_back_distance", 1.0),
         )
         self.front_clear_speed = max(0.01, self.param_float("front_clear_speed", 0.12))
         self.front_clear_timeout_sec = self.param_float("front_clear_timeout_sec", 8.0)
@@ -1792,12 +1797,16 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.cancel_timer("attach_timeout")
         x, y, yaw = self.detach_pose
-        goal = self.create_pose_stamped(x, y, yaw)
+        back_distance = self.scenario2_rear_cart_rejoin_back_distance
+        goal_x = x - back_distance * math.cos(yaw)
+        goal_y = y - back_distance * math.sin(yaw)
+        goal = self.create_pose_stamped(goal_x, goal_y, yaw)
         self.set_state(State.REAR_CART_REJOIN, "rear_cart_attached")
         self.enable_navigation_control()
         self.get_logger().info(
-            "scenario 2 rear cart rejoin goal: x=%.2f, y=%.2f, yaw=%.2f"
-            % (x, y, yaw)
+            "scenario 2 rear cart rejoin goal: x=%.2f, y=%.2f, yaw=%.2f "
+            "(detach=(%.2f, %.2f), back_distance=%.2f)"
+            % (goal_x, goal_y, yaw, x, y, back_distance)
         )
         if not self.send_rear_goal(
             goal,

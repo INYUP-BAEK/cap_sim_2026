@@ -177,7 +177,7 @@ controller_server:
         time_step: 3
 
       AckermannConstraints:
-        min_turning_r: 1.10
+        min_turning_r: 0.75
 
       critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic"]
 
@@ -382,7 +382,7 @@ planner_server:
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
       motion_model_for_search: "REEDS_SHEPP"
-      minimum_turning_radius: 1.40
+      minimum_turning_radius: 0.75
       reverse_penalty: 1.0
       change_penalty: 2.0
 
