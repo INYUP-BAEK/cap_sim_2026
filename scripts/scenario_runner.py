@@ -63,8 +63,8 @@ class AutoNavCommander(Node):
                 ("initial_attached", True),
                 ("enable_auto_scenario", True),
                 ("allow_manual_goal_interrupt", False),
-                ("scenario1_cart_station_x", 0.0),
-                ("scenario1_cart_station_y", 0.0),
+                ("scenario1_cart_station_x", 4.8533759117126465),
+                ("scenario1_cart_station_y", 0.4338681399822235),
                 ("scenario1_cart_count_after_docking", 3),
                 ("scenario1_pickup_max_retries", 3),
                 ("scenario2_cart_count_after_docking", 1),
@@ -437,16 +437,16 @@ class AutoNavCommander(Node):
 
         # Waypoints accept (x, y), (x, y, yaw_rad), (x, y, qz, qw),
         # (x, y, qx, qy, qz, qw), or PoseStamped-like dicts.
-        # self.patrol_path = [(6.15, -0.52), (7.02, 1.95)]
-        self.patrol_path = [
-            # (7.563, -16.764, 0.712, 0.702),
-            (7.099, -4.331, 0.704, 0.711),
-            (-3.604, -0.417, -1.000, 0.009),
-            (-8.901, -4.697, -0.712, 0.702),
-            (-9.068, -16.308, -0.681, 0.732),
-            (-1.477, -20.036, 0.008, 1.000),
-            (7.567, -16.613, 0.719, 0.695),
-        ]
+        self.patrol_path = [(6.15, -0.52), (7.02, 1.95)]
+        # self.patrol_path = [
+        #     (7.563, -16.764, 0.712, 0.702),
+        #     (7.099, -4.331, 0.704, 0.711),
+        #     (-3.604, -0.417, -1.000, 0.009),
+        #     (-8.901, -4.697, -0.712, 0.702),
+        #     (-9.068, -16.308, -0.681, 0.732),
+        #     (-1.477, -20.036, 0.008, 1.000),
+        #     (7.567, -16.613, 0.719, 0.695),
+        # ]
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
