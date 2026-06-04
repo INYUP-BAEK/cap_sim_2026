@@ -873,8 +873,8 @@ class AutoNavCommander(Node):
         if self.rear_cart_attached:
             return (
                 {
-                    "max_velocity": [0.03, 0.0, 0.35],
-                    "min_velocity": [-0.12, 0.0, -0.35],
+                    "max_velocity": [0.03, 0.0, 0.30],
+                    "min_velocity": [-0.12, 0.0, -0.30],
                     "max_accel": [0.20, 0.0, 1.0],
                     "max_decel": [-0.20, 0.0, -1.0],
                 },
