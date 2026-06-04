@@ -27,7 +27,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
 from rclpy.time import Time
-from std_msgs.msg import Bool, Empty, Int32, String, UInt16
+from std_msgs.msg import Bool, Int32, String, UInt16
 
 import tf2_geometry_msgs
 import tf2_ros
@@ -42,7 +42,13 @@ class State(str, Enum):
     REAR_ALIGN = "REAR_ALIGN"
     WAIT_PRECISE_POSE = "WAIT_PRECISE_POSE"
     DOCK_PREP = "DOCK_PREP"
+    REAR_CART_PREP = "REAR_CART_PREP"
+    WAIT_REAR_CART_ATTACH = "WAIT_REAR_CART_ATTACH"
+    REAR_CART_REJOIN = "REAR_CART_REJOIN"
+    ROBOT_REJOIN = "ROBOT_REJOIN"
     WAIT_ATTACH = "WAIT_ATTACH"
+    WAIT_FRONT_ATTACH = "WAIT_FRONT_ATTACH"
+    WAIT_ROBOT_ATTACH = "WAIT_ROBOT_ATTACH"
 
 
 class AutoNavCommander(Node):
@@ -57,6 +63,12 @@ class AutoNavCommander(Node):
                 ("initial_attached", True),
                 ("enable_auto_scenario", True),
                 ("allow_manual_goal_interrupt", False),
+                ("scenario1_cart_station_x", 0.0),
+                ("scenario1_cart_station_y", 0.0),
+                ("scenario1_cart_count_after_docking", 3),
+                ("scenario1_pickup_max_retries", 3),
+                ("scenario2_cart_count_after_docking", 1),
+                ("robot_rejoin_half_spacing", 0.5),
                 ("footprint_publish_period_sec", 0.5),
                 ("nav_server_timeout_sec", 2.0),
                 ("route_goal_max_retries", 2),
@@ -67,7 +79,7 @@ class AutoNavCommander(Node):
                 ("tf_retry_delay_sec", 0.5),
                 ("route_arrival_tolerance", 0.35),
                 ("route_tf_check_period_sec", 0.5),
-                ("cart_exit_direct_route", True),
+                ("cart_exit_direct_route", False),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("front_clear_speed", 0.12),
@@ -146,6 +158,30 @@ class AutoNavCommander(Node):
         )
         self.allow_manual_goal_interrupt = bool(
             self.get_parameter("allow_manual_goal_interrupt").value
+        )
+        self.scenario1_cart_station_x = self.param_float(
+            "scenario1_cart_station_x",
+            0.0,
+        )
+        self.scenario1_cart_station_y = self.param_float(
+            "scenario1_cart_station_y",
+            0.0,
+        )
+        self.scenario1_cart_count_after_docking = max(
+            1,
+            self.param_int("scenario1_cart_count_after_docking", 3),
+        )
+        self.scenario1_pickup_max_retries = max(
+            0,
+            self.param_int("scenario1_pickup_max_retries", 3),
+        )
+        self.scenario2_cart_count_after_docking = max(
+            1,
+            self.param_int("scenario2_cart_count_after_docking", 1),
+        )
+        self.robot_rejoin_half_spacing = max(
+            0.0,
+            self.param_float("robot_rejoin_half_spacing", 0.5),
         )
         self.nav_server_timeout_sec = self.param_float("nav_server_timeout_sec", 2.0)
         self.route_goal_max_retries = self.param_int("route_goal_max_retries", 2)
@@ -401,6 +437,14 @@ class AutoNavCommander(Node):
         self.resume_patrol_waypoint_index = 0
         self.rear_nav2_paused = False
         self.last_rear_costmap_clear_time = None
+        self.active_scenario_id = 0
+        self.detach_pose = None
+        self.rear_cart_attached = False
+        self.scenario_recovery_active = False
+        self.scenario1_pickup_retry_count = 0
+        self.rejoin_mode = None
+        self.rejoin_rear_goal_done = False
+        self.rejoin_front_goal_done = False
 
         self.detected_cart_pose = None
         self.pending_precise_pose_msg = None
@@ -580,7 +624,7 @@ class AutoNavCommander(Node):
                 10,
             ),
             self.create_subscription(
-                Empty,
+                Int32,
                 "/start_patrol_mission",
                 self.start_mission_callback,
                 10,
@@ -632,6 +676,39 @@ class AutoNavCommander(Node):
         if not bool(msg.data):
             return
 
+        if self.state == State.WAIT_REAR_CART_ATTACH:
+            if not self.rear_rl_docking_started:
+                self.get_logger().warn(
+                    "rear cart docking done ignored because rear RL has not started."
+                )
+                return
+            if not self.rear_rl_docking_done:
+                self.rear_rl_docking_done = True
+                self.get_logger().info("rear cart rl_docking_done=true")
+            self.rear_cart_attached = True
+            self.update_dynamic_state("rear_cart_attached")
+            self.cancel_timer("attach_timeout")
+            self.start_rear_cart_rejoin()
+            return
+
+        if self.state == State.WAIT_ROBOT_ATTACH:
+            if not self.rear_rl_docking_started:
+                self.get_logger().warn(
+                    "rear robot docking done ignored because rear RL has not started."
+                )
+                return
+            if not self.rear_rl_docking_done:
+                self.rear_rl_docking_done = True
+                self.get_logger().info("rear robot rl_docking_done=true")
+            self.check_robot_attach_done("rear_rl_docking_done")
+            return
+
+        if self.state == State.WAIT_FRONT_ATTACH:
+            if not self.rear_rl_docking_done:
+                self.rear_rl_docking_done = True
+                self.get_logger().info("rear cart rl_docking_done=true")
+            return
+
         if self.state != State.WAIT_ATTACH:
             self.get_logger().warn(
                 f"rear rl docking done ignored because scenario state={self.state.value}"
@@ -651,6 +728,32 @@ class AutoNavCommander(Node):
 
     def front_rl_docking_done_callback(self, msg: Bool):
         if not bool(msg.data):
+            return
+
+        if self.state == State.WAIT_FRONT_ATTACH:
+            if not self.front_rl_docking_started:
+                self.get_logger().warn(
+                    "front cart docking done ignored because front RL has not started."
+                )
+                return
+
+            if not self.front_rl_docking_done:
+                self.front_rl_docking_done = True
+                self.get_logger().info("front cart rl_docking_done=true")
+            self.check_front_attach_done("front_rl_docking_done")
+            return
+
+        if self.state == State.WAIT_ROBOT_ATTACH:
+            if not self.front_rl_docking_started:
+                self.get_logger().warn(
+                    "front robot docking done ignored because front RL has not started."
+                )
+                return
+
+            if not self.front_rl_docking_done:
+                self.front_rl_docking_done = True
+                self.get_logger().info("front robot rl_docking_done=true")
+            self.check_robot_attach_done("front_rl_docking_done")
             return
 
         if self.state != State.WAIT_ATTACH:
@@ -694,6 +797,13 @@ class AutoNavCommander(Node):
         else:
             self.publish_footprints()
 
+    def scenario_cart_count_after_docking(self):
+        if self.active_scenario_id == 1:
+            return self.scenario1_cart_count_after_docking
+        if self.active_scenario_id == 2:
+            return self.scenario2_cart_count_after_docking
+        return self.cart_count_after_docking
+
     def update_dynamic_state(self, reason: str):
         self.publish_footprints()
         smoother_params, mode = self.current_velocity_params()
@@ -721,6 +831,17 @@ class AutoNavCommander(Node):
                     "max_decel": [-0.5, 0.0, -1.2],
                 },
                 "ackermann direct mode",
+            )
+
+        if self.rear_cart_attached:
+            return (
+                {
+                    "max_velocity": [0.35, 0.0, 1.2],
+                    "min_velocity": [-0.35, 0.0, -1.2],
+                    "max_accel": [0.5, 0.0, 6.0],
+                    "max_decel": [-0.5, 0.0, -6.0],
+                },
+                "differential rear-cart mode (temporary detached limits)",
             )
 
         return (
@@ -751,6 +872,13 @@ class AutoNavCommander(Node):
                 self.create_polygon(0.01, -0.01, 0.01),
             )
 
+        if self.rear_cart_attached:
+            rear_front_x = self.wheelbase_from_cart_count(1) + 0.3
+            return (
+                self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
+                self.create_polygon(0.3, -0.3, 0.25),
+            )
+
         return (
             self.create_polygon(0.3, rear_bumper_x, rear_width),
             self.create_polygon(0.3, -0.3, 0.25),
@@ -764,11 +892,23 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     # Mission entry points
     # ------------------------------------------------------------------
-    def start_mission_callback(self, msg: Empty):
+    def start_mission_callback(self, msg: Int32):
         if not self.enable_auto_scenario:
             self.get_logger().warn("auto scenario is disabled.")
             return
-        self.start_patrol_route(self.patrol_path, "start_patrol_mission")
+
+        scenario_id = int(msg.data)
+        if scenario_id not in (1, 2):
+            self.get_logger().warn(
+                f"start_patrol_mission ignored: scenario_id must be 1 or 2, got={scenario_id}"
+            )
+            return
+
+        self.start_patrol_route(
+            self.patrol_path,
+            f"start_patrol_mission:{scenario_id}",
+            scenario_id=scenario_id,
+        )
 
     def mission_path_callback(self, msg: Path):
         if not self.enable_auto_scenario:
@@ -787,7 +927,7 @@ class AutoNavCommander(Node):
             if point is not None:
                 points.append(point)
 
-        self.start_patrol_route(points, "mission_path")
+        self.update_patrol_path(points, "mission_path")
 
     def mission_waypoints_callback(self, msg: PoseArray):
         if not self.enable_auto_scenario:
@@ -805,7 +945,7 @@ class AutoNavCommander(Node):
             if point is not None:
                 points.append(point)
 
-        self.start_patrol_route(points, "mission_waypoints")
+        self.update_patrol_path(points, "mission_waypoints")
 
     def mission_goal_callback(self, msg: PoseStamped):
         if self.state != State.IDLE:
@@ -840,7 +980,29 @@ class AutoNavCommander(Node):
             return
         self.send_rear_goal(msg, "MANUAL", self.current_behavior_tree())
 
-    def start_patrol_route(self, points, source: str):
+    def update_patrol_path(self, points, source: str):
+        if self.state != State.IDLE:
+            self.get_logger().warn(
+                f"{source} ignored because scenario state={self.state.value}"
+            )
+            return False
+
+        clean_points = self.clean_points(points)
+        if len(clean_points) < 2:
+            self.get_logger().error(
+                f"{source} needs at least 2 valid waypoints. got={len(clean_points)}"
+            )
+            return False
+
+        self.patrol_path = clean_points
+        self.current_patrol_waypoint_index = 0
+        self.get_logger().info(
+            f"{source} updated patrol path: {len(clean_points)} waypoints. "
+            "Publish /start_patrol_mission Int32(data=1 or 2) to start."
+        )
+        return True
+
+    def start_patrol_route(self, points, source: str, scenario_id=2):
         if self.state != State.IDLE:
             self.get_logger().warn(
                 f"{source} ignored because scenario state={self.state.value}"
@@ -869,28 +1031,78 @@ class AutoNavCommander(Node):
         self.patrol_path = clean_points
         self.current_patrol_waypoint_index = 0
         self.clear_patrol_resume_after_docking()
+        self.active_scenario_id = int(scenario_id)
+        self.detach_pose = None
+        self.rear_cart_attached = False
+        self.scenario_recovery_active = False
+        self.scenario1_pickup_retry_count = 0
+        self.rejoin_mode = None
+        self.rejoin_rear_goal_done = False
+        self.rejoin_front_goal_done = False
+        self.set_cart_count(0, f"{source}_start", publish=True)
 
         self.enable_navigation_control()
         wait_for_resume = self.resume_rear_nav2_on_scenario_start and self.rear_nav2_paused
         if self.resume_rear_nav2_on_scenario_start:
             self.resume_rear_nav2(source)
-        self.set_state(State.PATROL, source)
+        if self.active_scenario_id == 1:
+            self.set_state(State.APPROACH_EXIT, source)
+            start_callback = self.start_scenario1_pickup_route
+        else:
+            self.set_state(State.PATROL, source)
+            start_callback = lambda route=clean_points: self.start_route(route, "PATROL")
+
         if wait_for_resume:
             self.schedule_once(
                 "rear_nav2_resume_start_route",
                 self.rear_nav2_resume_delay_sec,
-                lambda route=clean_points: self.start_route(route, "PATROL")
-                if self.state == State.PATROL
+                lambda callback=start_callback: callback()
+                if self.state in (State.PATROL, State.APPROACH_EXIT)
                 else None,
             )
             return True
-        return self.start_route(clean_points, "PATROL")
+        return start_callback()
+
+    def start_scenario1_pickup_route(self):
+        if self.state != State.APPROACH_EXIT:
+            return False
+
+        station_x = float(self.scenario1_cart_station_x)
+        station_y = float(self.scenario1_cart_station_y)
+        self.detected_cart_pose = self.create_pose_stamped(station_x, station_y, 0.0)
+
+        current_progress = self.current_progress_on_path()
+        exit_projection = self.closest_point_on_path(
+            station_x,
+            station_y,
+            min_progress=current_progress + 0.05,
+        )
+        exit_route = self.build_route_to_exit(exit_projection, current_progress)
+
+        self.get_logger().info(
+            "scenario 1 cart station=(%.2f, %.2f). exit=(%.2f, %.2f), "
+            "exit_route_points=%d"
+            % (
+                station_x,
+                station_y,
+                exit_projection["point"][0],
+                exit_projection["point"][1],
+                len(exit_route),
+            )
+        )
+        return self.start_route(
+            exit_route,
+            "EXIT",
+            final_yaw=exit_projection["path_yaw"],
+        )
 
     # ------------------------------------------------------------------
     # Cart detection and route-to-exit
     # ------------------------------------------------------------------
     def cart_target_callback(self, msg: PointStamped):
         if self.state != State.PATROL:
+            return
+        if self.active_scenario_id != 2:
             return
         if self.cart_count >= 1:
             return
@@ -970,6 +1182,7 @@ class AutoNavCommander(Node):
         self.cancel_rear_goal()
         self.cancel_front_goal()
         self.clear_route()
+        self.record_detach_pose()
         self.front_clear_tf_retries = 0
         self.front_clear_goal_retry_count = 0
         self.rear_align_tf_retries = 0
@@ -998,20 +1211,44 @@ class AutoNavCommander(Node):
             "detach requested. Waiting for /docking_state=false from controller or joystick."
         )
 
+    def record_detach_pose(self):
+        pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
+        if pose is None:
+            self.get_logger().warn(
+                "detach pose unavailable; fallback/rejoin goals may be unavailable."
+            )
+            return
+
+        self.detach_pose = pose
+        self.get_logger().info(
+            "detach pose recorded: x=%.2f, y=%.2f, yaw=%.2f"
+            % (pose[0], pose[1], pose[2])
+        )
+
     def handle_docking_transition(self, attached: bool):
         if self.state == State.WAIT_DETACH and not attached:
             self.cancel_timer("detach_timeout")
             self.schedule_front_clear()
             return
 
-        if self.state == State.WAIT_ATTACH:
+        if self.state in (
+            State.WAIT_ATTACH,
+            State.WAIT_FRONT_ATTACH,
+            State.WAIT_ROBOT_ATTACH,
+        ):
             if attached:
                 if not self.docking_state_confirmed:
                     self.get_logger().info("docking_state=true confirmed")
                 self.docking_state_confirmed = True
-                self.check_rl_docking_sequence_done("docking_state")
             else:
                 self.docking_state_confirmed = False
+
+            if self.state == State.WAIT_ATTACH:
+                self.check_rl_docking_sequence_done("docking_state")
+            elif self.state == State.WAIT_FRONT_ATTACH:
+                self.check_front_attach_done("docking_state")
+            else:
+                self.check_robot_attach_done("docking_state")
             return
 
         if attached and self.state in (
@@ -1019,12 +1256,15 @@ class AutoNavCommander(Node):
             State.REAR_ALIGN,
             State.WAIT_PRECISE_POSE,
             State.DOCK_PREP,
+            State.REAR_CART_PREP,
+            State.WAIT_REAR_CART_ATTACH,
+            State.REAR_CART_REJOIN,
         ):
             self.get_logger().warn(
                 f"docking_state=true during {self.state.value}; finishing scenario early."
             )
             self.set_cart_count(
-                self.cart_count_after_docking,
+                self.scenario_cart_count_after_docking(),
                 "manual_attach",
                 publish=True,
             )
@@ -1310,6 +1550,16 @@ class AutoNavCommander(Node):
 
         self.cancel_timer("precise_pose_timeout")
         cart_yaw = self.normalize_angle(cart_yaw)
+
+        if self.active_scenario_id == 2:
+            self.handle_scenario2_precise_cart_pose(
+                cart_x,
+                cart_y,
+                cart_yaw,
+                source,
+            )
+            return
+
         rear_offset = self.rear_dock_goal_offset
         front_offset = self.front_dock_goal_offset
         rear_x = cart_x - rear_offset * math.cos(cart_yaw)
@@ -1367,18 +1617,60 @@ class AutoNavCommander(Node):
 
         self.schedule_dock_prep_tf_check()
 
-    def retry_dock_prep_rear_goal(self):
-        if self.state != State.DOCK_PREP:
+    def handle_scenario2_precise_cart_pose(self, cart_x, cart_y, cart_yaw, source):
+        rear_offset = self.rear_dock_goal_offset
+        rear_x = cart_x - rear_offset * math.cos(cart_yaw)
+        rear_y = cart_y - rear_offset * math.sin(cart_yaw)
+        rear_goal = self.create_pose_stamped(rear_x, rear_y, cart_yaw)
+
+        self.rear_dock_goal_done = False
+        self.front_dock_goal_done = False
+        self.dock_prep_rear_goal_retry_count = 0
+        self.last_dock_prep_rear_goal = rear_goal
+        self.last_dock_prep_front_goal = None
+        self.publish_dock_prep_done(False)
+        self.enable_navigation_control()
+        self.set_state(State.REAR_CART_PREP, f"precise_pose:{source}")
+        self.get_logger().info(
+            "scenario 2 rear cart prep from cart=(%.2f, %.2f, %.2f): "
+            "rear=(%.2f, %.2f, %.2f, offset=%.2f)"
+            % (
+                cart_x,
+                cart_y,
+                cart_yaw,
+                rear_goal.pose.position.x,
+                rear_goal.pose.position.y,
+                self.yaw_from_quaternion(rear_goal.pose.orientation),
+                rear_offset,
+            )
+        )
+
+        if not self.send_rear_goal(
+            rear_goal,
+            "REAR_CART_PREP",
+            self.diff_bt_path,
+        ):
+            self.abort_scenario("failed to send rear cart prep goal")
             return
-        if self.accept_dock_prep_goal_by_tf("rear", "dock prep retry check"):
+
+        self.schedule_dock_prep_tf_check()
+
+    def retry_dock_prep_rear_goal(self):
+        if self.state not in (State.DOCK_PREP, State.REAR_CART_PREP):
+            return
+        if self.state == State.REAR_CART_PREP:
+            if self.accept_rear_cart_prep_by_tf("dock prep retry check"):
+                return
+        elif self.accept_dock_prep_goal_by_tf("rear", "dock prep retry check"):
             return
         if self.last_dock_prep_rear_goal is None:
             self.abort_scenario("no rear dock prep goal to retry")
             return
+        label = "REAR_CART_PREP" if self.state == State.REAR_CART_PREP else "DOCK_PREP_REAR"
         self.get_logger().info("retrying rear dock prep goal.")
         if not self.send_rear_goal(
             self.last_dock_prep_rear_goal,
-            "DOCK_PREP_REAR",
+            label,
             self.diff_bt_path,
         ):
             self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
@@ -1414,6 +1706,286 @@ class AutoNavCommander(Node):
             "dock prep complete. Waiting for front RL done, rear RL done, "
             "and /docking_state=true."
         )
+
+    def enter_wait_rear_cart_attach(self):
+        self.cancel_rear_goal()
+        self.clear_precise_pose()
+        self.reset_rl_docking_sequence_state()
+        self.set_state(State.WAIT_REAR_CART_ATTACH, "rear_cart_prep_done")
+        self.enable_navigation_control()
+        self.rear_rl_docking_started = True
+        self.publish_rear_docking_target(2)
+
+        if self.attach_timeout_sec > 0.0:
+            self.schedule_once(
+                "attach_timeout",
+                self.attach_timeout_sec,
+                self.handle_attach_timeout,
+            )
+
+        self.get_logger().info(
+            "scenario 2 rear cart prep complete. Rear docking target start command published."
+        )
+
+    def start_rear_cart_rejoin(self):
+        if self.detach_pose is None:
+            self.abort_scenario("no detach pose for rear cart rejoin")
+            return
+
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.cancel_timer("attach_timeout")
+        x, y, yaw = self.detach_pose
+        goal = self.create_pose_stamped(x, y, yaw)
+        self.set_state(State.REAR_CART_REJOIN, "rear_cart_attached")
+        self.enable_navigation_control()
+        self.get_logger().info(
+            "scenario 2 rear cart rejoin goal: x=%.2f, y=%.2f, yaw=%.2f"
+            % (x, y, yaw)
+        )
+        if not self.send_rear_goal(goal, "REAR_CART_REJOIN", self.diff_bt_path):
+            self.abort_scenario("failed to send rear cart rejoin goal")
+
+    def enter_wait_front_attach(self):
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.clear_precise_pose()
+        self.set_state(State.WAIT_FRONT_ATTACH, "rear_cart_rejoined")
+        self.enable_navigation_control()
+        self.front_rl_docking_started = True
+        self.front_rl_docking_done = False
+        self.docking_state_confirmed = bool(self.is_attached)
+        self.publish_front_docking_target(2)
+
+        if self.attach_timeout_sec > 0.0:
+            self.schedule_once(
+                "attach_timeout",
+                self.attach_timeout_sec,
+                self.handle_attach_timeout,
+            )
+
+        self.get_logger().info(
+            "scenario 2 rear cart returned. Waiting for front RL done and /docking_state=true."
+        )
+
+    def check_front_attach_done(self, reason: str):
+        if self.state != State.WAIT_FRONT_ATTACH:
+            return
+        if not (self.front_rl_docking_done and self.docking_state_confirmed):
+            return
+
+        self.cancel_timer("attach_timeout")
+        self.rear_cart_attached = False
+        self.set_cart_count(
+            self.scenario_cart_count_after_docking(),
+            reason,
+            publish=True,
+        )
+        if self.resume_patrol_after_docking(reason):
+            return
+        self.complete_scenario("front_attach_sequence_done")
+
+    def recover_scenario_failure(self, reason: str):
+        if self.scenario_recovery_active:
+            return False
+        if self.detach_pose is None:
+            return False
+
+        scenario1_retry_states = (
+            State.FRONT_CLEAR,
+            State.REAR_ALIGN,
+            State.WAIT_PRECISE_POSE,
+            State.DOCK_PREP,
+            State.WAIT_ATTACH,
+        )
+        if self.active_scenario_id == 1 and self.state in scenario1_retry_states:
+            if self.scenario1_pickup_retry_count >= self.scenario1_pickup_max_retries:
+                self.get_logger().error(
+                    "scenario 1 pickup retry limit reached: %d/%d"
+                    % (
+                        self.scenario1_pickup_retry_count,
+                        self.scenario1_pickup_max_retries,
+                    )
+                )
+                return False
+            return self.start_scenario1_pickup_retry(reason)
+
+        scenario2_rejoin_states = (
+            State.FRONT_CLEAR,
+            State.REAR_ALIGN,
+            State.WAIT_PRECISE_POSE,
+            State.REAR_CART_PREP,
+            State.WAIT_REAR_CART_ATTACH,
+            State.REAR_CART_REJOIN,
+            State.WAIT_FRONT_ATTACH,
+        )
+        if self.active_scenario_id == 2 and self.state in scenario2_rejoin_states:
+            return self.start_scenario2_direct_rejoin(reason)
+
+        return False
+
+    def start_scenario1_pickup_retry(self, reason: str):
+        self.scenario1_pickup_retry_count += 1
+        self.scenario_recovery_active = True
+        self.rejoin_mode = "scenario1_retry"
+        self.rear_cart_attached = False
+        self.get_logger().warn(
+            "scenario 1 pickup retry %d/%d after failure: %s"
+            % (
+                self.scenario1_pickup_retry_count,
+                self.scenario1_pickup_max_retries,
+                reason,
+            )
+        )
+        return self.start_rejoin_pose_goals("scenario1_retry")
+
+    def start_scenario2_direct_rejoin(self, reason: str):
+        self.scenario_recovery_active = True
+        self.rejoin_mode = "scenario2_direct_rejoin"
+        self.rear_cart_attached = False
+        self.set_cart_count(0, "scenario2_direct_rejoin", publish=True)
+        self.get_logger().warn(
+            f"scenario 2 cart pickup abandoned. Rejoining direct ackermann: {reason}"
+        )
+        return self.start_rejoin_pose_goals("scenario2_direct_rejoin")
+
+    def start_rejoin_pose_goals(self, mode: str):
+        if self.detach_pose is None:
+            self.scenario_recovery_active = False
+            self.get_logger().error("cannot start rejoin goals: detach pose is unavailable.")
+            return False
+
+        self.cancel_all_timers()
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.clear_route()
+        self.clear_precise_pose()
+        self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
+        self.clear_rl_docking_sequence_state()
+        self.publish_docking_target(0)
+        self.publish_bool_burst(f"{mode}_gripper_release", self.gripper_toggle_pub, False)
+        self.publish_bool_burst(f"{mode}_front_release", self.front_home_pub, True)
+
+        rear_goal, front_goal = self.rejoin_goal_poses()
+        if rear_goal is None or front_goal is None:
+            self.scenario_recovery_active = False
+            return False
+
+        self.rejoin_rear_goal_done = False
+        self.rejoin_front_goal_done = False
+        self.set_state(State.ROBOT_REJOIN, mode)
+        self.enable_navigation_control()
+        self.get_logger().info(
+            "rejoin pose goals (%s): rear=(%.2f, %.2f), front=(%.2f, %.2f)"
+            % (
+                mode,
+                rear_goal.pose.position.x,
+                rear_goal.pose.position.y,
+                front_goal.pose.position.x,
+                front_goal.pose.position.y,
+            )
+        )
+
+        rear_sent = self.send_rear_goal(rear_goal, "REJOIN_REAR", self.diff_bt_path)
+        front_sent = self.send_front_goal(front_goal, "REJOIN_FRONT")
+        if not rear_sent or not front_sent:
+            self.scenario_recovery_active = False
+            self.get_logger().error("failed to send rejoin pose goals.")
+            return False
+        return True
+
+    def rejoin_goal_poses(self):
+        if self.detach_pose is None:
+            return None, None
+
+        x, y, yaw = self.detach_pose
+        spacing = self.robot_rejoin_half_spacing
+        rear_x = x - spacing * math.cos(yaw)
+        rear_y = y - spacing * math.sin(yaw)
+        front_x = x + spacing * math.cos(yaw)
+        front_y = y + spacing * math.sin(yaw)
+        return (
+            self.create_pose_stamped(rear_x, rear_y, yaw),
+            self.create_pose_stamped(front_x, front_y, yaw),
+        )
+
+    def check_rejoin_pose_done(self):
+        if self.state != State.ROBOT_REJOIN:
+            return
+        if not (self.rejoin_rear_goal_done and self.rejoin_front_goal_done):
+            return
+
+        mode = self.rejoin_mode
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.rejoin_rear_goal_done = False
+        self.rejoin_front_goal_done = False
+
+        if mode == "scenario1_retry":
+            self.scenario_recovery_active = False
+            self.rejoin_mode = None
+            self.clear_precise_pose()
+            self.set_state(State.WAIT_PRECISE_POSE, "scenario1_retry_rejoined")
+            if self.precise_pose_timeout_sec > 0.0:
+                self.schedule_once(
+                    "precise_pose_timeout",
+                    self.precise_pose_timeout_sec,
+                    self.handle_precise_pose_timeout,
+                )
+            self.get_logger().info(
+                "scenario 1 robots returned to detach area. Waiting for precise cart pose."
+            )
+            self.consume_pending_precise_pose()
+            return
+
+        if mode == "scenario2_direct_rejoin":
+            self.enter_wait_robot_attach()
+            return
+
+        self.abort_scenario(f"unknown rejoin mode: {mode}")
+
+    def enter_wait_robot_attach(self):
+        self.clear_precise_pose()
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.reset_rl_docking_sequence_state()
+        self.set_state(State.WAIT_ROBOT_ATTACH, "direct_robot_rejoin_pose_done")
+        self.enable_navigation_control()
+        self.front_rl_docking_started = True
+        self.rear_rl_docking_started = True
+        self.publish_front_docking_target(1)
+        self.publish_rear_docking_target(1)
+
+        if self.attach_timeout_sec > 0.0:
+            self.schedule_once(
+                "attach_timeout",
+                self.attach_timeout_sec,
+                self.handle_attach_timeout,
+            )
+
+        self.get_logger().info(
+            "direct robot rejoin targets published. Waiting for front/rear RL done and /docking_state=true."
+        )
+
+    def check_robot_attach_done(self, reason: str):
+        if self.state != State.WAIT_ROBOT_ATTACH:
+            return
+        if not (
+            self.front_rl_docking_done
+            and self.rear_rl_docking_done
+            and self.docking_state_confirmed
+        ):
+            return
+
+        self.cancel_timer("attach_timeout")
+        self.scenario_recovery_active = False
+        self.rejoin_mode = None
+        self.rear_cart_attached = False
+        self.set_cart_count(0, reason, publish=True)
+        if self.resume_patrol_after_docking(reason):
+            return
+        self.complete_scenario("direct_robot_rejoin_done")
 
     # ------------------------------------------------------------------
     # Route and action callbacks
@@ -1732,6 +2304,13 @@ class AutoNavCommander(Node):
         elif label == "DOCK_PREP_REAR":
             self.rear_dock_goal_done = True
             self.check_dock_prep_done()
+        elif label == "REAR_CART_PREP":
+            self.enter_wait_rear_cart_attach()
+        elif label == "REAR_CART_REJOIN":
+            self.enter_wait_front_attach()
+        elif label == "REJOIN_REAR":
+            self.rejoin_rear_goal_done = True
+            self.check_rejoin_pose_done()
         elif label == "MANUAL":
             self.set_state(State.IDLE, "manual_goal_done")
 
@@ -1761,6 +2340,9 @@ class AutoNavCommander(Node):
         elif label == "DOCK_PREP_FRONT":
             self.front_dock_goal_done = True
             self.check_dock_prep_done()
+        elif label == "REJOIN_FRONT":
+            self.rejoin_front_goal_done = True
+            self.check_rejoin_pose_done()
 
     def check_dock_prep_done(self):
         if (
@@ -1790,6 +2372,15 @@ class AutoNavCommander(Node):
         )
 
     def check_dock_prep_tf_fallback(self):
+        if self.state == State.REAR_CART_PREP:
+            if self.accept_rear_cart_prep_by_tf(
+                "periodic TF check",
+                cancel_active=True,
+            ):
+                return
+            self.schedule_dock_prep_tf_check()
+            return
+
         if self.state != State.DOCK_PREP:
             return
 
@@ -1839,6 +2430,24 @@ class AutoNavCommander(Node):
             f"{robot_name} dock prep accepted by TF fallback ({reason})."
         )
         self.check_dock_prep_done()
+        return True
+
+    def accept_rear_cart_prep_by_tf(self, reason: str, cancel_active=False):
+        if self.state != State.REAR_CART_PREP:
+            return False
+        if not self.dock_prep_goal_reached_by_tf("rear", reason):
+            return False
+
+        if cancel_active:
+            self.cancel_rear_goal()
+
+        self.rear_dock_goal_done = True
+        self.active_rear_goal_pending = False
+        self.active_rear_goal_label = None
+        self.get_logger().info(
+            f"rear cart prep accepted by TF fallback ({reason})."
+        )
+        self.enter_wait_rear_cart_attach()
         return True
 
     def dock_prep_goal_reached_by_tf(self, robot_name: str, reason: str):
@@ -1931,7 +2540,7 @@ class AutoNavCommander(Node):
 
         self.cancel_timer("attach_timeout")
         self.set_cart_count(
-            self.cart_count_after_docking,
+            self.scenario_cart_count_after_docking(),
             reason,
             publish=True,
         )
@@ -2059,6 +2668,13 @@ class AutoNavCommander(Node):
                 return
             self.get_logger().warn(reason)
             self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
+        elif label == "REAR_CART_PREP":
+            if self.accept_rear_cart_prep_by_tf(reason):
+                return
+            self.get_logger().warn(reason)
+            self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
+        elif label in ("REAR_CART_REJOIN", "REJOIN_REAR"):
+            self.abort_scenario(reason)
         elif label == "MANUAL":
             self.abort_scenario(reason)
         else:
@@ -2076,6 +2692,8 @@ class AutoNavCommander(Node):
         elif label == "DOCK_PREP_FRONT":
             if self.accept_dock_prep_goal_by_tf("front", reason):
                 return
+            self.abort_scenario(reason)
+        elif label == "REJOIN_FRONT":
             self.abort_scenario(reason)
         else:
             self.get_logger().warn(reason)
@@ -2170,9 +2788,14 @@ class AutoNavCommander(Node):
             self.abort_scenario("precise pose timeout")
 
     def handle_attach_timeout(self):
-        if self.state == State.WAIT_ATTACH:
+        if self.state in (
+            State.WAIT_ATTACH,
+            State.WAIT_REAR_CART_ATTACH,
+            State.WAIT_FRONT_ATTACH,
+            State.WAIT_ROBOT_ATTACH,
+        ):
             self.abort_scenario(
-                "attach timeout waiting for front/rear rl_docking_done and docking_state=true"
+                "attach timeout waiting for expected rl_docking_done and docking_state"
             )
 
     def complete_scenario(self, reason):
@@ -2186,11 +2809,19 @@ class AutoNavCommander(Node):
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
         self.clear_patrol_resume_after_docking()
+        self.active_scenario_id = 0
+        self.detach_pose = None
+        self.rear_cart_attached = False
+        self.scenario_recovery_active = False
+        self.rejoin_mode = None
         self.update_dynamic_state("scenario_complete")
         self.enable_joystick_control()
         self.set_state(State.IDLE, reason)
 
     def abort_scenario(self, reason, return_joystick=True):
+        if self.recover_scenario_failure(reason):
+            return
+
         self.get_logger().error(f"scenario aborted: {reason}")
         self.cancel_all_timers()
         self.cancel_rear_goal()
@@ -2201,6 +2832,11 @@ class AutoNavCommander(Node):
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
         self.clear_patrol_resume_after_docking()
+        self.active_scenario_id = 0
+        self.detach_pose = None
+        self.rear_cart_attached = False
+        self.scenario_recovery_active = False
+        self.rejoin_mode = None
         if return_joystick:
             self.enable_joystick_control()
         self.set_state(State.IDLE, "abort")
