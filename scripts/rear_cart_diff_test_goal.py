@@ -28,6 +28,8 @@ class RearCartDiffTestGoal(Node):
         self.declare_parameter("back_distance_m", 1.0)
         self.declare_parameter("right_distance_m", 1.0)
         self.declare_parameter("send_delay_sec", 1.0)
+        self.declare_parameter("tf_timeout_sec", 10.0)
+        self.declare_parameter("tf_retry_period_sec", 0.2)
         self.declare_parameter("server_timeout_sec", 5.0)
         self.declare_parameter("behavior_tree", "")
         self.declare_parameter("publish_rear_cart_footprint", True)
@@ -52,6 +54,14 @@ class RearCartDiffTestGoal(Node):
         )
         self.right_distance_m = float(self.get_parameter("right_distance_m").value)
         self.send_delay_sec = max(0.0, float(self.get_parameter("send_delay_sec").value))
+        self.tf_timeout_sec = max(
+            0.1,
+            float(self.get_parameter("tf_timeout_sec").value),
+        )
+        self.tf_retry_period_sec = max(
+            0.05,
+            float(self.get_parameter("tf_retry_period_sec").value),
+        )
         self.server_timeout_sec = max(
             0.1,
             float(self.get_parameter("server_timeout_sec").value),
@@ -80,6 +90,11 @@ class RearCartDiffTestGoal(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.nav_client = ActionClient(self, NavigateToPose, self.action_name)
         self.goal_handle = None
+        self.last_tf_errors = {}
+        self.node_start_time = self.get_clock().now()
+        self.tf_wait_start_time = None
+        self.last_tf_wait_log_time = None
+        self.goal_sent = False
 
         self.global_footprint_pub = self.create_publisher(
             Polygon,
@@ -105,8 +120,8 @@ class RearCartDiffTestGoal(Node):
         if self.set_velocity_smoother:
             self.set_rear_cart_velocity_limits()
 
-        self.start_timer = self.create_timer(
-            max(0.01, self.send_delay_sec),
+        self.goal_timer = self.create_timer(
+            self.tf_retry_period_sec,
             self.send_test_goal,
         )
         self.get_logger().info(
@@ -115,17 +130,44 @@ class RearCartDiffTestGoal(Node):
         )
 
     def send_test_goal(self):
-        self.start_timer.cancel()
-        self.destroy_timer(self.start_timer)
+        if self.goal_sent:
+            return
+
+        now = self.get_clock().now()
+        if self.elapsed_sec(self.node_start_time, now) < self.send_delay_sec:
+            return
+
+        if self.tf_wait_start_time is None:
+            self.tf_wait_start_time = now
+            self.get_logger().info(
+                "waiting up to %.1fs for TF %s -> [%s]"
+                % (
+                    self.tf_timeout_sec,
+                    self.map_frame,
+                    ", ".join(self.base_frame_candidates),
+                )
+            )
 
         pose = self.current_pose_in_map()
         if pose is None:
+            elapsed = self.elapsed_sec(self.tf_wait_start_time, now)
+            if elapsed < self.tf_timeout_sec:
+                self.log_tf_wait(now, elapsed)
+                return
+
+            self.goal_timer.cancel()
+            self.destroy_timer(self.goal_timer)
             self.get_logger().error(
-                "failed to get current rear pose from TF frames: %s"
-                % ", ".join(self.base_frame_candidates)
+                "failed to get current rear pose from TF frames after %.1fs: %s"
+                % (elapsed, ", ".join(self.base_frame_candidates))
             )
+            self.log_tf_errors()
             rclpy.shutdown()
             return
+
+        self.goal_sent = True
+        self.goal_timer.cancel()
+        self.destroy_timer(self.goal_timer)
 
         x, y, yaw, frame = pose
         dx = -self.back_distance_m
@@ -177,10 +219,12 @@ class RearCartDiffTestGoal(Node):
         rclpy.shutdown()
 
     def current_pose_in_map(self):
+        self.last_tf_errors = {}
         for frame in self.base_frame_candidates:
             try:
                 tf = self.tf_buffer.lookup_transform(self.map_frame, frame, Time())
-            except tf2_ros.TransformException:
+            except tf2_ros.TransformException as ex:
+                self.last_tf_errors[frame] = str(ex)
                 continue
 
             t = tf.transform.translation
@@ -188,6 +232,40 @@ class RearCartDiffTestGoal(Node):
             yaw = self.yaw_from_quaternion(q.x, q.y, q.z, q.w)
             return (t.x, t.y, yaw, frame)
         return None
+
+    def log_tf_wait(self, now, elapsed):
+        if self.last_tf_wait_log_time is not None:
+            if self.elapsed_sec(self.last_tf_wait_log_time, now) < 1.0:
+                return
+
+        self.last_tf_wait_log_time = now
+        self.get_logger().warn(
+            "rear pose TF not ready yet (%.1fs/%.1fs): %s"
+            % (
+                elapsed,
+                self.tf_timeout_sec,
+                self.short_tf_error_summary(),
+            )
+        )
+
+    def short_tf_error_summary(self):
+        if not self.last_tf_errors:
+            return "no TF error details"
+        return "; ".join(
+            "%s: %s" % (frame, error)
+            for frame, error in self.last_tf_errors.items()
+        )
+
+    def log_tf_errors(self):
+        for frame, error in self.last_tf_errors.items():
+            self.get_logger().error(
+                "TF lookup %s -> %s failed: %s"
+                % (self.map_frame, frame, error)
+            )
+
+    @staticmethod
+    def elapsed_sec(start, end):
+        return (end - start).nanoseconds / 1e9
 
     def create_pose_stamped(self, x: float, y: float, yaw: float):
         msg = PoseStamped()

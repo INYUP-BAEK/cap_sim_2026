@@ -56,6 +56,16 @@ def generate_launch_description():
                 description="Delay before sampling TF and sending the test goal.",
             ),
             DeclareLaunchArgument(
+                "tf_timeout_sec",
+                default_value="10.0",
+                description="Maximum time to wait for map-to-base TF before failing.",
+            ),
+            DeclareLaunchArgument(
+                "tf_retry_period_sec",
+                default_value="0.2",
+                description="Retry period while waiting for map-to-base TF.",
+            ),
+            DeclareLaunchArgument(
                 "publish_rear_cart_footprint",
                 default_value="true",
                 description="Publish rear-cart footprint while the test node runs.",
@@ -86,6 +96,14 @@ def generate_launch_description():
                         "behavior_tree": LaunchConfiguration("behavior_tree"),
                         "send_delay_sec": ParameterValue(
                             LaunchConfiguration("send_delay_sec"),
+                            value_type=float,
+                        ),
+                        "tf_timeout_sec": ParameterValue(
+                            LaunchConfiguration("tf_timeout_sec"),
+                            value_type=float,
+                        ),
+                        "tf_retry_period_sec": ParameterValue(
+                            LaunchConfiguration("tf_retry_period_sec"),
                             value_type=float,
                         ),
                         "publish_rear_cart_footprint": ParameterValue(
