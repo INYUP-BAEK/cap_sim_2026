@@ -44,6 +44,7 @@ class State(str, Enum):
     DOCK_PREP = "DOCK_PREP"
     REAR_CART_PREP = "REAR_CART_PREP"
     WAIT_REAR_CART_ATTACH = "WAIT_REAR_CART_ATTACH"
+    REAR_CART_GRIP_SETTLE = "REAR_CART_GRIP_SETTLE"
     REAR_CART_REJOIN = "REAR_CART_REJOIN"
     ROBOT_REJOIN = "ROBOT_REJOIN"
     WAIT_ATTACH = "WAIT_ATTACH"
@@ -716,6 +717,7 @@ class AutoNavCommander(Node):
             self.update_dynamic_state("rear_cart_attached")
             self.cancel_timer("attach_timeout")
             delay = self.rear_cart_grip_settle_delay_sec
+            self.set_state(State.REAR_CART_GRIP_SETTLE, "rear_cart_rl_done")
             self.get_logger().info(
                 "rear cart grip settle wait before rejoin: %.2fs" % delay
             )
@@ -1287,6 +1289,23 @@ class AutoNavCommander(Node):
                 self.check_robot_attach_done("docking_state")
             return
 
+        if (
+            self.active_scenario_id == 2
+            and attached
+            and self.state
+            in (
+                State.REAR_CART_PREP,
+                State.WAIT_REAR_CART_ATTACH,
+                State.REAR_CART_GRIP_SETTLE,
+                State.REAR_CART_REJOIN,
+            )
+        ):
+            self.get_logger().warn(
+                f"docking_state=true ignored during {self.state.value}; "
+                "waiting for scenario 2 front attach stage."
+            )
+            return
+
         if attached and self.state in (
             State.FRONT_CLEAR,
             State.REAR_ALIGN,
@@ -1789,6 +1808,12 @@ class AutoNavCommander(Node):
         )
 
     def start_rear_cart_rejoin(self):
+        if self.state != State.REAR_CART_GRIP_SETTLE:
+            self.get_logger().warn(
+                "rear cart rejoin skipped because state=%s" % self.state.value
+            )
+            return
+
         if self.detach_pose is None:
             self.abort_scenario("no detach pose for rear cart rejoin")
             return
@@ -1885,6 +1910,7 @@ class AutoNavCommander(Node):
             State.WAIT_PRECISE_POSE,
             State.REAR_CART_PREP,
             State.WAIT_REAR_CART_ATTACH,
+            State.REAR_CART_GRIP_SETTLE,
             State.REAR_CART_REJOIN,
             State.WAIT_FRONT_ATTACH,
         )
