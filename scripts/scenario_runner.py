@@ -97,7 +97,7 @@ class AutoNavCommander(Node):
                 ("detach_timeout_sec", 12.0),
                 ("precise_pose_timeout_sec", 12.0),
                 ("attach_timeout_sec", 180.0),
-                ("rear_cart_grip_settle_delay_sec", 2.0),
+                ("rear_cart_grip_settle_delay_sec", 3.0),
                 ("front_goal_timeout_sec", 30.0),
                 ("dock_goal_offset", 1.5),
                 ("rear_dock_goal_offset", 1.5),
@@ -262,7 +262,7 @@ class AutoNavCommander(Node):
         self.attach_timeout_sec = self.param_float("attach_timeout_sec", 180.0)
         self.rear_cart_grip_settle_delay_sec = max(
             0.0,
-            self.param_float("rear_cart_grip_settle_delay_sec", 2.0),
+            self.param_float("rear_cart_grip_settle_delay_sec", 1.0),
         )
         self.front_goal_timeout_sec = self.param_float("front_goal_timeout_sec", 30.0)
         self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
@@ -703,9 +703,10 @@ class AutoNavCommander(Node):
                     "rear cart docking done ignored because rear RL has not started."
                 )
                 return
-            if not self.rear_rl_docking_done:
-                self.rear_rl_docking_done = True
-                self.get_logger().info("rear cart rl_docking_done=true")
+            if self.rear_rl_docking_done:
+                return
+            self.rear_rl_docking_done = True
+            self.get_logger().info("rear cart rl_docking_done=true")
             self.rear_cart_attached = True
             self.update_dynamic_state("rear_cart_attached")
             self.cancel_timer("attach_timeout")
