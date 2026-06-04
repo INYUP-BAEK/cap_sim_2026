@@ -82,6 +82,8 @@ class AutoNavCommander(Node):
                 ("cart_exit_direct_route", False),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
+                ("scenario2_front_wait_clear_distance", 0.8),
+                ("scenario2_front_wait_clear_timeout_sec", 0.0),
                 ("front_clear_speed", 0.12),
                 ("front_clear_timeout_sec", 8.0),
                 ("publish_front_initial_pose_before_clear", True),
@@ -95,6 +97,7 @@ class AutoNavCommander(Node):
                 ("detach_timeout_sec", 12.0),
                 ("precise_pose_timeout_sec", 12.0),
                 ("attach_timeout_sec", 180.0),
+                ("rear_cart_grip_settle_delay_sec", 2.0),
                 ("front_goal_timeout_sec", 30.0),
                 ("dock_goal_offset", 1.5),
                 ("rear_dock_goal_offset", 1.5),
@@ -215,6 +218,14 @@ class AutoNavCommander(Node):
             2.0,
         )
         self.front_clear_distance = self.param_float("front_clear_distance", 0.5)
+        self.scenario2_front_wait_clear_distance = max(
+            0.0,
+            self.param_float("scenario2_front_wait_clear_distance", 0.5),
+        )
+        self.scenario2_front_wait_clear_timeout_sec = self.param_float(
+            "scenario2_front_wait_clear_timeout_sec",
+            0.0,
+        )
         self.front_clear_speed = max(0.01, self.param_float("front_clear_speed", 0.12))
         self.front_clear_timeout_sec = self.param_float("front_clear_timeout_sec", 8.0)
         self.publish_front_initial_pose_before_clear = bool(
@@ -249,6 +260,10 @@ class AutoNavCommander(Node):
             12.0,
         )
         self.attach_timeout_sec = self.param_float("attach_timeout_sec", 180.0)
+        self.rear_cart_grip_settle_delay_sec = max(
+            0.0,
+            self.param_float("rear_cart_grip_settle_delay_sec", 2.0),
+        )
         self.front_goal_timeout_sec = self.param_float("front_goal_timeout_sec", 30.0)
         self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
         self.rear_dock_goal_offset = max(
@@ -378,6 +393,11 @@ class AutoNavCommander(Node):
 
         pkg_dir = get_package_share_directory("cap_sim_2026")
         self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
+        self.rear_cart_diff_bt_path = os.path.join(
+            pkg_dir,
+            "bt_xml",
+            "rear_cart_diff_nav_tree.xml",
+        )
         self.ackermann_bt_path = os.path.join(pkg_dir, "bt_xml", "ackermann_nav_tree.xml")
         self.ackermann_cart_bt_path = os.path.join(
             pkg_dir,
@@ -456,6 +476,7 @@ class AutoNavCommander(Node):
         self.last_cart_goal_time = None
         self.front_clear_tf_retries = 0
         self.front_clear_goal_retry_count = 0
+        self.front_wait_clear_goal_retry_count = 0
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
@@ -688,7 +709,15 @@ class AutoNavCommander(Node):
             self.rear_cart_attached = True
             self.update_dynamic_state("rear_cart_attached")
             self.cancel_timer("attach_timeout")
-            self.start_rear_cart_rejoin()
+            delay = self.rear_cart_grip_settle_delay_sec
+            self.get_logger().info(
+                "rear cart grip settle wait before rejoin: %.2fs" % delay
+            )
+            self.schedule_once(
+                "rear_cart_grip_settle",
+                delay,
+                self.start_rear_cart_rejoin,
+            )
             return
 
         if self.state == State.WAIT_ROBOT_ATTACH:
@@ -836,12 +865,12 @@ class AutoNavCommander(Node):
         if self.rear_cart_attached:
             return (
                 {
-                    "max_velocity": [0.35, 0.0, 1.2],
-                    "min_velocity": [-0.35, 0.0, -1.2],
-                    "max_accel": [0.5, 0.0, 6.0],
-                    "max_decel": [-0.5, 0.0, -6.0],
+                    "max_velocity": [0.03, 0.0, 0.35],
+                    "min_velocity": [-0.12, 0.0, -0.35],
+                    "max_accel": [0.20, 0.0, 1.0],
+                    "max_decel": [-0.20, 0.0, -1.0],
                 },
-                "differential rear-cart mode (temporary detached limits)",
+                "differential rear-cart mode",
             )
 
         return (
@@ -1185,6 +1214,7 @@ class AutoNavCommander(Node):
         self.record_detach_pose()
         self.front_clear_tf_retries = 0
         self.front_clear_goal_retry_count = 0
+        self.front_wait_clear_goal_retry_count = 0
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
@@ -1317,6 +1347,31 @@ class AutoNavCommander(Node):
         )
         if not self.send_front_clear_command():
             self.retry_or_abort("front_clear_goal_retry", self.start_front_clear_move)
+
+    def start_scenario2_front_wait_clear(self):
+        if self.state != State.FRONT_CLEAR:
+            return False
+        if self.active_scenario_id != 2:
+            return False
+
+        distance = self.scenario2_front_wait_clear_distance
+        if distance <= 0.0:
+            return False
+
+        self.get_logger().info(
+            "scenario 2 front wait clear: %.2fm forward before rear cart rejoin."
+            % distance
+        )
+        if not self.send_front_clear_command(
+            label="FRONT_WAIT_CLEAR",
+            distance=distance,
+            timeout_sec=self.scenario2_front_wait_clear_timeout_sec,
+        ):
+            self.retry_or_abort(
+                "front_wait_clear_goal_retry",
+                self.start_scenario2_front_wait_clear,
+            )
+        return True
 
     def front_initial_pose_estimate(self):
         source = self.front_initial_pose_source.lower()
@@ -1743,7 +1798,11 @@ class AutoNavCommander(Node):
             "scenario 2 rear cart rejoin goal: x=%.2f, y=%.2f, yaw=%.2f"
             % (x, y, yaw)
         )
-        if not self.send_rear_goal(goal, "REAR_CART_REJOIN", self.diff_bt_path):
+        if not self.send_rear_goal(
+            goal,
+            "REAR_CART_REJOIN",
+            self.rear_cart_diff_bt_path,
+        ):
             self.abort_scenario("failed to send rear cart rejoin goal")
 
     def enter_wait_front_attach(self):
@@ -1926,17 +1985,10 @@ class AutoNavCommander(Node):
             self.scenario_recovery_active = False
             self.rejoin_mode = None
             self.clear_precise_pose()
-            self.set_state(State.WAIT_PRECISE_POSE, "scenario1_retry_rejoined")
-            if self.precise_pose_timeout_sec > 0.0:
-                self.schedule_once(
-                    "precise_pose_timeout",
-                    self.precise_pose_timeout_sec,
-                    self.handle_precise_pose_timeout,
-                )
             self.get_logger().info(
-                "scenario 1 robots returned to detach area. Waiting for precise cart pose."
+                "scenario 1 robots returned to detach area. Restarting rear heading alignment."
             )
-            self.consume_pending_precise_pose()
+            self.start_rear_heading_alignment()
             return
 
         if mode == "scenario2_direct_rejoin":
@@ -2116,40 +2168,53 @@ class AutoNavCommander(Node):
         self.schedule_front_goal_timeout()
         return True
 
-    def send_front_clear_command(self):
+    def send_front_clear_command(
+        self,
+        label="FRONT_CLEAR",
+        distance=None,
+        speed=None,
+        timeout_sec=None,
+    ):
         if self.front_nav_transport != "topic_proxy":
             self.get_logger().error(
                 "front clear odom move requires front_nav_transport=topic_proxy."
             )
             return False
 
+        distance = self.front_clear_distance if distance is None else float(distance)
+        distance = max(0.0, distance)
+        speed = self.front_clear_speed if speed is None else abs(float(speed))
+        speed = max(0.01, speed)
+        timeout_sec = (
+            self.front_clear_timeout_sec if timeout_sec is None else float(timeout_sec)
+        )
+
         self.publish_bool_once(self.front_joy_sig_pub, False)
         self.active_front_goal_seq += 1
         goal_id = self.active_front_goal_seq
         self.active_front_proxy_goal_id = goal_id
         self.active_front_goal_pending = True
-        self.active_front_goal_label = "FRONT_CLEAR"
+        self.active_front_goal_label = label
 
-        timeout_sec = self.front_clear_timeout_sec
         if timeout_sec <= 0.0:
-            timeout_sec = max(3.0, self.front_clear_distance / self.front_clear_speed + 3.0)
+            timeout_sec = max(3.0, distance / speed + 3.0)
 
         msg = String()
         msg.data = json.dumps(
             {
                 "id": goal_id,
-                "label": "FRONT_CLEAR",
+                "label": label,
                 "command": "clear_forward",
-                "distance": float(self.front_clear_distance),
-                "speed": float(self.front_clear_speed),
+                "distance": float(distance),
+                "speed": float(speed),
                 "timeout_sec": float(timeout_sec),
             }
         )
         self.front_nav_goal_pub.publish(msg)
         self.get_logger().info(
             "front clear command published: "
-            f"id={goal_id}, distance={self.front_clear_distance:.2f}, "
-            f"speed={self.front_clear_speed:.2f}"
+            f"id={goal_id}, label={label}, distance={distance:.2f}, "
+            f"speed={speed:.2f}"
         )
         self.schedule_front_goal_timeout()
         return True
@@ -2336,6 +2401,10 @@ class AutoNavCommander(Node):
 
     def handle_front_goal_success(self, label):
         if label == "FRONT_CLEAR":
+            if self.start_scenario2_front_wait_clear():
+                return
+            self.start_rear_heading_alignment()
+        elif label == "FRONT_WAIT_CLEAR":
             self.start_rear_heading_alignment()
         elif label == "DOCK_PREP_FRONT":
             self.front_dock_goal_done = True
@@ -2689,6 +2758,11 @@ class AutoNavCommander(Node):
 
         if label == "FRONT_CLEAR":
             self.retry_or_abort("front_clear_goal_retry", self.start_front_clear_move)
+        elif label == "FRONT_WAIT_CLEAR":
+            self.retry_or_abort(
+                "front_wait_clear_goal_retry",
+                self.start_scenario2_front_wait_clear,
+            )
         elif label == "DOCK_PREP_FRONT":
             if self.accept_dock_prep_goal_by_tf("front", reason):
                 return
@@ -3697,6 +3771,8 @@ class AutoNavCommander(Node):
             self.get_logger().warn(f"{node_name} rejected parameters: {failed}")
 
     def current_behavior_tree(self):
+        if self.rear_cart_attached and not self.is_attached:
+            return self.rear_cart_diff_bt_path
         if not self.is_attached:
             return self.diff_bt_path
         if self.cart_count >= 1:

@@ -7,8 +7,8 @@ controller_server:
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
     progress_checker_plugin: "progress_checker"
-    goal_checker_plugins: ["ackermann_goal_checker", "diff_goal_checker"]
-    controller_plugins: ["FollowPathAckermann", "FollowPathDiff", "FollowPathAckermann_cart2"]
+    goal_checker_plugins: ["ackermann_goal_checker", "diff_goal_checker", "rear_cart_diff_goal_checker"]
+    controller_plugins: ["FollowPathAckermann", "FollowPathDiff", "FollowPathAckermann_cart2", "FollowPathRearCartDiff"]
 
     # ==========================================================
     # 🏎️ 1. 직결 모드 : 아커만 주행 (0.48m 휠베이스 완전 최적화)
@@ -145,7 +145,54 @@ controller_server:
       Oscillation.oscillation_reset_angle: 0.20
 
     # ==========================================================
-    # ✂️ 3. 카트 2개 합체 모드 : 아커만 주행 (1.45m 휠베이스 최적화)
+    # 3. 리어봇+카트 분리 모드 : 저속 후진 중심 디퍼런셜 주행
+    # ==========================================================
+    FollowPathRearCartDiff:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: false
+      # Cart is in front of the rear robot; use the robot's reverse direction as
+      # the stable pulling direction and keep angular motion conservative.
+      min_vel_x: -0.12
+      min_vel_y: 0.0
+      max_vel_x: 0.03
+      max_vel_y: 0.0
+      max_vel_theta: 0.35
+      min_speed_xy: 0.0
+      max_speed_xy: 0.12
+      min_speed_theta: 0.05
+      acc_lim_x: 0.20
+      acc_lim_y: 0.0
+      acc_lim_theta: 1.0
+      decel_lim_x: -0.20
+      decel_lim_y: 0.0
+      decel_lim_theta: -1.0
+      vx_samples: 14
+      vy_samples: 1
+      vtheta_samples: 21
+      sim_time: 1.8
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.5
+      xy_goal_tolerance: 0.15
+      trans_stopped_velocity: 0.04
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      BaseObstacle.scale: 0.04
+      PathAlign.scale: 24.0
+      PathAlign.forward_point_distance: 0.08
+      GoalAlign.scale: 18.0
+      GoalAlign.forward_point_distance: 0.08
+      PathDist.scale: 32.0
+      GoalDist.scale: 28.0
+      RotateToGoal.scale: 20.0
+      RotateToGoal.slowing_factor: 6.0
+      RotateToGoal.lookahead_time: -1.0
+      Oscillation.oscillation_reset_dist: 0.08
+      Oscillation.oscillation_reset_angle: 0.20
+
+    # ==========================================================
+    # ✂️ 4. 카트 2개 합체 모드 : 아커만 주행 (1.45m 휠베이스 최적화)
     # ==========================================================
     FollowPathAckermann_cart2:
       plugin: "nav2_mppi_controller::MPPIController"
@@ -246,6 +293,12 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.05
       yaw_goal_tolerance: 0.10
+
+    rear_cart_diff_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.20
       
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
