@@ -154,11 +154,11 @@ controller_server:
       # stable travel direction while the cart is being pulled out.
       time_steps: 75
       model_dt: 0.08
-      batch_size: 1600
-      vx_std: 0.05
+      batch_size: 2000
+      vx_std: 0.08
       vy_std: 0.0
       wz_std: 0.2
-      vx_max: 0.03
+      vx_max: 0.0
       vx_min: -0.12
       vy_max: 0.0
       vy_min: 0.0
@@ -188,13 +188,13 @@ controller_server:
       GoalCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 4.0
-        threshold_to_consider: 1.2
+        cost_weight: 8.0
+        threshold_to_consider: 2.5
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 2.0
-        threshold_to_consider: 0.6
+        cost_weight: 1.0
+        threshold_to_consider: 0.45
       ObstaclesCritic:
         enabled: true
         cost_power: 1
@@ -207,27 +207,28 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 18.0
+        cost_weight: 10.0
         max_heuristic_delay: 0.1
         trajectory_point_step: 2
         threshold_to_consider: 0.4
-        offset_from_furthest: 6
+        offset_from_furthest: 4
         max_path_occupancy_ratio: 0.1
-        use_path_orientations: true
+        use_path_orientations: false
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 14.0
-        offset_from_furthest: 3
+        cost_weight: 24.0
+        offset_from_furthest: 5
         threshold_to_consider: 1.0
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 18.0
-        offset_from_furthest: 3
+        cost_weight: 10.0
+        offset_from_furthest: 5
         threshold_to_consider: 0.4
         max_angle_to_prefer: 0.95
         max_angle_to_furthest: 1.2
+        forward_preference: false
 
     # ==========================================================
     # ✂️ 4. 카트 2개 합체 모드 : 아커만 주행 (1.45m 휠베이스 최적화)

@@ -76,6 +76,8 @@ class AutoNavCommander(Node):
                 ("route_goal_retry_delay_sec", 1.0),
                 ("route_goal_rejected_max_retries", 8),
                 ("route_goal_rejected_retry_delay_sec", 2.5),
+                ("rear_cart_prep_goal_max_retries", 20),
+                ("rear_cart_prep_goal_retry_delay_sec", 3.0),
                 ("state_max_retries", 8),
                 ("tf_retry_delay_sec", 0.5),
                 ("route_arrival_tolerance", 0.35),
@@ -201,6 +203,14 @@ class AutoNavCommander(Node):
         self.route_goal_rejected_retry_delay_sec = self.param_float(
             "route_goal_rejected_retry_delay_sec",
             2.5,
+        )
+        self.rear_cart_prep_goal_max_retries = max(
+            0,
+            self.param_int("rear_cart_prep_goal_max_retries", 20),
+        )
+        self.rear_cart_prep_goal_retry_delay_sec = max(
+            0.1,
+            self.param_float("rear_cart_prep_goal_retry_delay_sec", 3.0),
         )
         self.state_max_retries = self.param_int("state_max_retries", 8)
         self.tf_retry_delay_sec = self.param_float("tf_retry_delay_sec", 0.5)
@@ -468,6 +478,7 @@ class AutoNavCommander(Node):
         self.rear_cart_attached = False
         self.scenario_recovery_active = False
         self.scenario1_pickup_retry_count = 0
+        self.rear_cart_prep_goal_retry_count = 0
         self.rejoin_mode = None
         self.rejoin_rear_goal_done = False
         self.rejoin_front_goal_done = False
@@ -486,6 +497,7 @@ class AutoNavCommander(Node):
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
+        self.rear_cart_prep_goal_retry_count = 0
         self.precise_goal_retries = 0
         self.front_rl_docking_started = False
         self.front_rl_docking_done = False
@@ -873,7 +885,7 @@ class AutoNavCommander(Node):
         if self.rear_cart_attached:
             return (
                 {
-                    "max_velocity": [0.03, 0.0, 0.30],
+                    "max_velocity": [0.0, 0.0, 0.30],
                     "min_velocity": [-0.12, 0.0, -0.30],
                     "max_accel": [0.20, 0.0, 1.0],
                     "max_decel": [-0.20, 0.0, -1.0],
@@ -1226,6 +1238,7 @@ class AutoNavCommander(Node):
         self.rear_align_tf_retries = 0
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
+        self.rear_cart_prep_goal_retry_count = 0
         self.precise_goal_retries = 0
 
         if not self.is_attached:
@@ -1613,6 +1626,16 @@ class AutoNavCommander(Node):
         self.get_logger().info(
             f"{source} received during rear align; starting dock prep goals now."
         )
+        self.cancel_timer("rear_align_tf_retry")
+        if (
+            self.active_rear_goal_label == "REAR_ALIGN"
+            or self.active_rear_goal_pending
+            or self.active_rear_goal_handle is not None
+        ):
+            self.get_logger().info(
+                "canceling rear heading goal because precise cart pose is available."
+            )
+            self.cancel_rear_goal()
         self.set_state(State.WAIT_PRECISE_POSE, f"{source}_received")
         if self.precise_pose_timeout_sec > 0.0:
             self.schedule_once(
@@ -1661,6 +1684,7 @@ class AutoNavCommander(Node):
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.dock_prep_rear_goal_retry_count = 0
+        self.rear_cart_prep_goal_retry_count = 0
         self.last_dock_prep_rear_goal = rear_goal
         self.last_dock_prep_front_goal = front_goal
         self.publish_dock_prep_done(False)
@@ -1706,6 +1730,7 @@ class AutoNavCommander(Node):
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.dock_prep_rear_goal_retry_count = 0
+        self.rear_cart_prep_goal_retry_count = 0
         self.last_dock_prep_rear_goal = rear_goal
         self.last_dock_prep_front_goal = None
         self.publish_dock_prep_done(False)
@@ -1730,7 +1755,7 @@ class AutoNavCommander(Node):
             "REAR_CART_PREP",
             self.diff_bt_path,
         ):
-            self.abort_scenario("failed to send rear cart prep goal")
+            self.retry_rear_cart_prep_or_abort("failed to send rear cart prep goal")
             return
 
         self.schedule_dock_prep_tf_check()
@@ -1753,7 +1778,39 @@ class AutoNavCommander(Node):
             label,
             self.diff_bt_path,
         ):
-            self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
+            if label == "REAR_CART_PREP":
+                self.retry_rear_cart_prep_or_abort(
+                    "failed to resend rear cart prep goal"
+                )
+            else:
+                self.retry_or_abort(
+                    "dock_prep_rear_goal_retry",
+                    self.retry_dock_prep_rear_goal,
+                )
+
+    def retry_rear_cart_prep_or_abort(self, reason: str):
+        if self.state != State.REAR_CART_PREP:
+            return
+
+        count = self.rear_cart_prep_goal_retry_count + 1
+        self.rear_cart_prep_goal_retry_count = count
+        max_retries = self.rear_cart_prep_goal_max_retries
+        if count > max_retries:
+            self.abort_scenario(
+                "rear_cart_prep_goal_retry exceeded retry limit: %s" % reason
+            )
+            return
+
+        delay = self.rear_cart_prep_goal_retry_delay_sec
+        self.get_logger().warn(
+            "%s. retry rear cart prep goal %d/%d after %.1fs"
+            % (reason, count, max_retries, delay)
+        )
+        self.schedule_once(
+            "rear_cart_prep_goal_retry",
+            delay,
+            self.retry_dock_prep_rear_goal,
+        )
 
     def enter_wait_attach(self):
         self.clear_precise_pose()
@@ -1789,8 +1846,10 @@ class AutoNavCommander(Node):
 
     def enter_wait_rear_cart_attach(self):
         self.cancel_rear_goal()
+        self.cancel_timer("rear_cart_prep_goal_retry")
         self.clear_precise_pose()
         self.reset_rl_docking_sequence_state()
+        self.rear_cart_prep_goal_retry_count = 0
         self.set_state(State.WAIT_REAR_CART_ATTACH, "rear_cart_prep_done")
         self.enable_navigation_control()
         self.rear_rl_docking_started = True
@@ -2401,6 +2460,11 @@ class AutoNavCommander(Node):
             self.active_route_index += 1
             self.send_current_route_goal()
         elif label == "REAR_ALIGN":
+            if self.state != State.REAR_ALIGN:
+                self.get_logger().info(
+                    "rear align result ignored because state=%s" % self.state.value
+                )
+                return
             self.wait_for_precise_pose()
         elif label == "DOCK_PREP_REAR":
             self.rear_dock_goal_done = True
@@ -2766,6 +2830,12 @@ class AutoNavCommander(Node):
                 return
             self.handle_route_failure(reason)
         elif label == "REAR_ALIGN":
+            if self.state != State.REAR_ALIGN:
+                self.get_logger().info(
+                    "rear align failure ignored because state=%s: %s"
+                    % (self.state.value, reason)
+                )
+                return
             self.get_logger().warn(reason)
             self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
         elif label == "DOCK_PREP_REAR":
@@ -2777,7 +2847,7 @@ class AutoNavCommander(Node):
             if self.accept_rear_cart_prep_by_tf(reason):
                 return
             self.get_logger().warn(reason)
-            self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
+            self.retry_rear_cart_prep_or_abort(reason)
         elif label in ("REAR_CART_REJOIN", "REJOIN_REAR"):
             self.abort_scenario(reason)
         elif label == "MANUAL":
