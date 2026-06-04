@@ -72,6 +72,8 @@ allowlist:
   - name: rt/front/home
   - name: rt/front/cart_docking
   - name: rt/front/robot_docking
+  - name: rt/front/docking_target
+  - name: rt/front/rl_docking_done
   - name: rt/front/initialpose
   - name: rt/front/global_costmap/footprint
   - name: rt/front/local_costmap/footprint

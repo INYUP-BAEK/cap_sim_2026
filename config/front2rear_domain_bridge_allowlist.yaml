@@ -70,6 +70,14 @@ topics:
   front/robot_docking:
     type: std_msgs/msg/Bool
 
+  front/docking_target:
+    type: std_msgs/msg/Int32
+
+  front/rl_docking_done:
+    type: std_msgs/msg/Bool
+    from_domain: 48
+    to_domain: 49
+
   front/initialpose:
     type: geometry_msgs/msg/PoseWithCovarianceStamped
 

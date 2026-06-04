@@ -104,15 +104,14 @@ controller_server:
     FollowPathDiff:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      # Allow a small reverse sample so DWB can recover after overshooting
-      # a tight goal, but keep reverse expensive with PreferForward below.
-      min_vel_x: -0.08
+      # Small reverse window for overshoot recovery only; keep DWB critics unchanged.
+      min_vel_x: -0.05
       min_vel_y: 0.0
-      max_vel_x: 0.22
+      max_vel_x: 0.20
       max_vel_y: 0.0
       max_vel_theta: 0.80
       min_speed_xy: 0.0
-      max_speed_xy: 0.22
+      max_speed_xy: 0.20
       min_speed_theta: 0.25
       acc_lim_x: 0.50
       acc_lim_y: 0.0
@@ -120,23 +119,18 @@ controller_server:
       decel_lim_x: -0.50
       decel_lim_y: 0.0
       decel_lim_theta: -6.0
-      vx_samples: 18
+      vx_samples: 12
       vy_samples: 1
       vtheta_samples: 25
       sim_time: 1.2
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.5
-      xy_goal_tolerance: 0.05
+      xy_goal_tolerance: 0.10
       trans_stopped_velocity: 0.08
       short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "PreferForward", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      PreferForward.scale: 8.0
-      PreferForward.penalty: 1.5
-      PreferForward.strafe_x: 0.05
-      PreferForward.strafe_theta: 0.20
-      PreferForward.theta_scale: 8.0
+      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 18.0
       PathAlign.forward_point_distance: 0.12
@@ -147,7 +141,7 @@ controller_server:
       RotateToGoal.scale: 36.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
-      Oscillation.oscillation_reset_dist: 0.10
+      Oscillation.oscillation_reset_dist: 0.05
       Oscillation.oscillation_reset_angle: 0.20
 
     # ==========================================================

@@ -18,7 +18,7 @@ from geometry_msgs.msg import (
     PoseStamped,
 )
 from nav2_msgs.action import NavigateToPose
-from nav2_msgs.srv import ManageLifecycleNodes
+from nav2_msgs.srv import ClearEntireCostmap, ManageLifecycleNodes
 from nav_msgs.msg import Path
 from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
@@ -27,7 +27,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
 from rclpy.time import Time
-from std_msgs.msg import Bool, Empty, String, UInt16
+from std_msgs.msg import Bool, Empty, Int32, String, UInt16
 
 import tf2_geometry_msgs
 import tf2_ros
@@ -61,9 +61,13 @@ class AutoNavCommander(Node):
                 ("nav_server_timeout_sec", 2.0),
                 ("route_goal_max_retries", 2),
                 ("route_goal_retry_delay_sec", 1.0),
+                ("route_goal_rejected_max_retries", 8),
+                ("route_goal_rejected_retry_delay_sec", 2.5),
                 ("state_max_retries", 8),
                 ("tf_retry_delay_sec", 0.5),
                 ("route_arrival_tolerance", 0.35),
+                ("route_tf_check_period_sec", 0.5),
+                ("cart_exit_direct_route", True),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("front_clear_speed", 0.12),
@@ -81,13 +85,17 @@ class AutoNavCommander(Node):
                 ("attach_timeout_sec", 180.0),
                 ("front_goal_timeout_sec", 30.0),
                 ("dock_goal_offset", 1.5),
+                ("rear_dock_goal_offset", 1.5),
+                ("front_dock_goal_offset", 1.0),
                 ("rear_final_yaw_tolerance", 0.08),
+                ("dock_prep_tf_xy_tolerance", 0.20),
+                ("dock_prep_tf_yaw_tolerance", 0.35),
+                ("dock_prep_tf_check_period_sec", 0.5),
                 ("precise_pose2d_frame", "base_link"),
                 ("cart_marker_front_back_offset_m", 0.30),
                 ("cart_marker_left_right_offset_m", 0.18),
                 ("command_burst_duration_sec", 0.5),
                 ("command_burst_period_sec", 0.1),
-                ("release_to_joystick_on_wait_attach", True),
                 ("auto_attach_after_dock_prep", False),
                 ("front_nav_transport", "topic_proxy"),
                 ("front_nav_goal_topic", "/front/scenario_nav_goal"),
@@ -95,7 +103,10 @@ class AutoNavCommander(Node):
                 ("front_nav_result_topic", "/front/scenario_nav_result"),
                 ("dock_prep_done_topic", "/dock_prep_done"),
                 ("rl_docking_ready_topic", "/rl_docking_ready"),
+                ("docking_target_topic", "/docking_target"),
+                ("front_docking_target_topic", "/front/docking_target"),
                 ("rl_docking_done_topic", "/rl_docking_done"),
+                ("front_rl_docking_done_topic", "/front/rl_docking_done"),
                 ("cart_count_topic", "/cart_count"),
                 ("cart_count_after_docking", 1),
                 ("manage_rear_nav2_lifecycle", True),
@@ -108,6 +119,18 @@ class AutoNavCommander(Node):
                 ),
                 ("rear_nav2_lifecycle_service_timeout_sec", 2.0),
                 ("rear_nav2_resume_delay_sec", 1.0),
+                ("clear_rear_costmaps_on_cart_mode", True),
+                (
+                    "rear_global_costmap_clear_service",
+                    "/global_costmap/clear_entirely_global_costmap",
+                ),
+                (
+                    "rear_local_costmap_clear_service",
+                    "/local_costmap/clear_entirely_local_costmap",
+                ),
+                ("rear_costmap_clear_service_timeout_sec", 0.5),
+                ("rear_costmap_clear_settle_sec", 0.7),
+                ("rear_costmap_clear_min_interval_sec", 1.0),
                 ("cart_goal_cooldown_sec", 0.5),
                 ("attached_cart_stop_distance", 1.5),
                 ("detached_cart_stop_distance", 1.0),
@@ -130,11 +153,26 @@ class AutoNavCommander(Node):
             "route_goal_retry_delay_sec",
             1.0,
         )
+        self.route_goal_rejected_max_retries = self.param_int(
+            "route_goal_rejected_max_retries",
+            8,
+        )
+        self.route_goal_rejected_retry_delay_sec = self.param_float(
+            "route_goal_rejected_retry_delay_sec",
+            2.5,
+        )
         self.state_max_retries = self.param_int("state_max_retries", 8)
         self.tf_retry_delay_sec = self.param_float("tf_retry_delay_sec", 0.5)
         self.route_arrival_tolerance = self.param_float(
             "route_arrival_tolerance",
             0.35,
+        )
+        self.route_tf_check_period_sec = max(
+            0.0,
+            self.param_float("route_tf_check_period_sec", 0.5),
+        )
+        self.cart_exit_direct_route = bool(
+            self.get_parameter("cart_exit_direct_route").value
         )
         self.front_clear_after_detach_delay_sec = self.param_float(
             "front_clear_after_detach_delay_sec",
@@ -177,9 +215,29 @@ class AutoNavCommander(Node):
         self.attach_timeout_sec = self.param_float("attach_timeout_sec", 180.0)
         self.front_goal_timeout_sec = self.param_float("front_goal_timeout_sec", 30.0)
         self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
+        self.rear_dock_goal_offset = max(
+            0.0,
+            self.param_float("rear_dock_goal_offset", 1.5),
+        )
+        self.front_dock_goal_offset = max(
+            0.0,
+            self.param_float("front_dock_goal_offset", 1.0),
+        )
         self.rear_final_yaw_tolerance = max(
             0.01,
             self.param_float("rear_final_yaw_tolerance", 0.08),
+        )
+        self.dock_prep_tf_xy_tolerance = max(
+            0.01,
+            self.param_float("dock_prep_tf_xy_tolerance", 0.20),
+        )
+        self.dock_prep_tf_yaw_tolerance = max(
+            0.01,
+            self.param_float("dock_prep_tf_yaw_tolerance", 0.35),
+        )
+        self.dock_prep_tf_check_period_sec = max(
+            0.0,
+            self.param_float("dock_prep_tf_check_period_sec", 0.5),
         )
         self.precise_pose2d_frame = self.normalize_frame_id(
             self.get_parameter("precise_pose2d_frame").value
@@ -199,9 +257,6 @@ class AutoNavCommander(Node):
         self.command_burst_period_sec = max(
             0.02,
             self.param_float("command_burst_period_sec", 0.1),
-        )
-        self.release_to_joystick_on_wait_attach = bool(
-            self.get_parameter("release_to_joystick_on_wait_attach").value
         )
         self.auto_attach_after_dock_prep = bool(
             self.get_parameter("auto_attach_after_dock_prep").value
@@ -224,8 +279,17 @@ class AutoNavCommander(Node):
         self.rl_docking_ready_topic = str(
             self.get_parameter("rl_docking_ready_topic").value
         ).strip()
+        self.docking_target_topic = str(
+            self.get_parameter("docking_target_topic").value
+        ).strip()
+        self.front_docking_target_topic = str(
+            self.get_parameter("front_docking_target_topic").value
+        ).strip()
         self.rl_docking_done_topic = str(
             self.get_parameter("rl_docking_done_topic").value
+        ).strip()
+        self.front_rl_docking_done_topic = str(
+            self.get_parameter("front_rl_docking_done_topic").value
         ).strip()
         self.cart_count_topic = str(
             self.get_parameter("cart_count_topic").value
@@ -254,6 +318,27 @@ class AutoNavCommander(Node):
             "rear_nav2_resume_delay_sec",
             1.0,
         )
+        self.clear_rear_costmaps_on_cart_mode = bool(
+            self.get_parameter("clear_rear_costmaps_on_cart_mode").value
+        )
+        self.rear_global_costmap_clear_service = str(
+            self.get_parameter("rear_global_costmap_clear_service").value
+        ).strip()
+        self.rear_local_costmap_clear_service = str(
+            self.get_parameter("rear_local_costmap_clear_service").value
+        ).strip()
+        self.rear_costmap_clear_service_timeout_sec = self.param_float(
+            "rear_costmap_clear_service_timeout_sec",
+            0.5,
+        )
+        self.rear_costmap_clear_settle_sec = self.param_float(
+            "rear_costmap_clear_settle_sec",
+            0.7,
+        )
+        self.rear_costmap_clear_min_interval_sec = self.param_float(
+            "rear_costmap_clear_min_interval_sec",
+            1.0,
+        )
 
         pkg_dir = get_package_share_directory("cap_sim_2026")
         self.diff_bt_path = os.path.join(pkg_dir, "bt_xml", "diff_nav_tree.xml")
@@ -274,6 +359,14 @@ class AutoNavCommander(Node):
             ManageLifecycleNodes,
             self.rear_nav2_lifecycle_service,
         )
+        self.rear_global_costmap_clear_client = self.create_client(
+            ClearEntireCostmap,
+            self.rear_global_costmap_clear_service,
+        )
+        self.rear_local_costmap_clear_client = self.create_client(
+            ClearEntireCostmap,
+            self.rear_local_costmap_clear_service,
+        )
 
         self.active_rear_goal_handle = None
         self.active_rear_goal_seq = 0
@@ -286,18 +379,34 @@ class AutoNavCommander(Node):
         self.active_front_goal_label = None
         self.active_front_proxy_goal_id = 0
 
-        self.patrol_path = [(6.15, -0.52), (7.02, 1.95)]
+        # Waypoints accept (x, y), (x, y, yaw_rad), (x, y, qz, qw),
+        # (x, y, qx, qy, qz, qw), or PoseStamped-like dicts.
+        # self.patrol_path = [(6.15, -0.52), (7.02, 1.95)]
+        self.patrol_path = [
+            # (7.563, -16.764, 0.712, 0.702),
+            (7.099, -4.331, 0.704, 0.711),
+            (-3.604, -0.417, -1.000, 0.009),
+            (-8.901, -4.697, -0.712, 0.702),
+            (-9.068, -16.308, -0.681, 0.732),
+            (-1.477, -20.036, 0.008, 1.000),
+            (7.567, -16.613, 0.719, 0.695),
+        ]
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.active_route_patrol_start_index = 0
         self.route_goal_retry_count = 0
         self.current_patrol_waypoint_index = 0
+        self.pending_patrol_resume_after_docking = False
+        self.resume_patrol_waypoint_index = 0
         self.rear_nav2_paused = False
+        self.last_rear_costmap_clear_time = None
 
         self.detected_cart_pose = None
         self.pending_precise_pose_msg = None
         self.pending_precise_pose_type = None
         self.last_dock_prep_rear_goal = None
+        self.last_dock_prep_front_goal = None
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.last_cart_goal_time = None
@@ -307,6 +416,11 @@ class AutoNavCommander(Node):
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
         self.precise_goal_retries = 0
+        self.front_rl_docking_started = False
+        self.front_rl_docking_done = False
+        self.rear_rl_docking_done = False
+        self.rear_rl_docking_started = False
+        self.docking_state_confirmed = bool(self.is_attached)
         self.scenario_timers = {}
 
         self.global_footprint_pub = self.create_publisher(
@@ -356,6 +470,16 @@ class AutoNavCommander(Node):
             self.rl_docking_ready_topic,
             10,
         )
+        self.docking_target_pub = self.create_publisher(
+            Int32,
+            self.docking_target_topic,
+            10,
+        )
+        self.front_docking_target_pub = self.create_publisher(
+            Int32,
+            self.front_docking_target_topic,
+            10,
+        )
         self.cart_count_pub = self.create_publisher(
             UInt16,
             self.cart_count_topic,
@@ -386,6 +510,12 @@ class AutoNavCommander(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
         )
+        cart_target_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         self.tf_listener = tf2_ros.TransformListener(
             self.tf_buffer,
             self,
@@ -399,6 +529,12 @@ class AutoNavCommander(Node):
                 Bool,
                 self.rl_docking_done_topic,
                 self.rl_docking_done_callback,
+                10,
+            ),
+            self.create_subscription(
+                Bool,
+                self.front_rl_docking_done_topic,
+                self.front_rl_docking_done_callback,
                 10,
             ),
             self.create_subscription(
@@ -417,7 +553,7 @@ class AutoNavCommander(Node):
                 PointStamped,
                 "/zed_yolo/global_cart_target",
                 self.cart_target_callback,
-                10,
+                cart_target_qos,
             ),
             self.create_subscription(
                 PoseStamped,
@@ -498,25 +634,56 @@ class AutoNavCommander(Node):
 
         if self.state != State.WAIT_ATTACH:
             self.get_logger().warn(
-                f"rl docking done ignored because scenario state={self.state.value}"
+                f"rear rl docking done ignored because scenario state={self.state.value}"
             )
             return
 
-        self.cancel_timer("attach_timeout")
-        if not self.is_attached:
-            self.is_attached = True
-            self.get_logger().info("rl_docking_done -> attached=True")
-        self.set_cart_count(
-            self.cart_count_after_docking,
-            "rl_docking_done",
-            publish=True,
-        )
-        self.complete_scenario("rl_docking_done")
+        if not self.rear_rl_docking_started:
+            self.get_logger().warn(
+                "rear rl docking done ignored because rear RL has not started."
+            )
+            return
+
+        if not self.rear_rl_docking_done:
+            self.rear_rl_docking_done = True
+            self.get_logger().info("rear rl_docking_done=true")
+        self.check_rl_docking_sequence_done("rear_rl_docking_done")
+
+    def front_rl_docking_done_callback(self, msg: Bool):
+        if not bool(msg.data):
+            return
+
+        if self.state != State.WAIT_ATTACH:
+            self.get_logger().warn(
+                f"front rl docking done ignored because scenario state={self.state.value}"
+            )
+            return
+
+        if not self.front_rl_docking_started:
+            self.get_logger().warn(
+                "front rl docking done ignored because front RL has not started."
+            )
+            return
+
+        if not self.front_rl_docking_done:
+            self.front_rl_docking_done = True
+            self.get_logger().info("front rl_docking_done=true")
+
+        if not self.rear_rl_docking_started:
+            self.rear_rl_docking_started = True
+            self.publish_rear_docking_target(2)
+            self.get_logger().info(
+                "front RL docking complete. Rear docking target start command published."
+            )
+
+        self.check_rl_docking_sequence_done("front_rl_docking_done")
 
     def set_cart_count(self, count: int, reason: str, publish: bool):
         next_count = max(0, int(count))
         changed = self.cart_count != next_count
         self.cart_count = next_count
+        if self.cart_count <= 0:
+            self.last_rear_costmap_clear_time = None
 
         if publish:
             self.publish_cart_count(self.cart_count)
@@ -612,7 +779,11 @@ class AutoNavCommander(Node):
         points = []
         for index, pose_stamped in enumerate(msg.poses):
             source_frame = self.normalize_frame_id(pose_stamped.header.frame_id) or frame_id
-            point = self.pose_to_map_xy(pose_stamped.pose, source_frame, f"path[{index}]")
+            point = self.pose_to_map_waypoint(
+                pose_stamped.pose,
+                source_frame,
+                f"path[{index}]",
+            )
             if point is not None:
                 points.append(point)
 
@@ -626,7 +797,11 @@ class AutoNavCommander(Node):
         source_frame = self.normalize_frame_id(msg.header.frame_id) or "map"
         points = []
         for index, pose in enumerate(msg.poses):
-            point = self.pose_to_map_xy(pose, source_frame, f"waypoint[{index}]")
+            point = self.pose_to_map_waypoint(
+                pose,
+                source_frame,
+                f"waypoint[{index}]",
+            )
             if point is not None:
                 points.append(point)
 
@@ -693,6 +868,7 @@ class AutoNavCommander(Node):
         self.detected_cart_pose = None
         self.patrol_path = clean_points
         self.current_patrol_waypoint_index = 0
+        self.clear_patrol_resume_after_docking()
 
         self.enable_navigation_control()
         wait_for_resume = self.resume_rear_nav2_on_scenario_start and self.rear_nav2_paused
@@ -715,6 +891,8 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     def cart_target_callback(self, msg: PointStamped):
         if self.state != State.PATROL:
+            return
+        if self.cart_count >= 1:
             return
         if not msg.header.frame_id:
             self.get_logger().warn("cart target frame_id is empty. Ignored.")
@@ -747,6 +925,10 @@ class AutoNavCommander(Node):
             self.get_logger().info(
                 "cart target is close enough; starting detach sequence from current area."
             )
+            self.prepare_patrol_resume_after_docking(
+                "cart close",
+                use_active_route=True,
+            )
             self.clear_route()
             self.cancel_rear_goal()
             self.start_detach_sequence()
@@ -761,16 +943,21 @@ class AutoNavCommander(Node):
         exit_route = self.build_route_to_exit(exit_projection, current_progress)
 
         self.get_logger().info(
-            "cart detected at map=(%.2f, %.2f). exit=(%.2f, %.2f)"
+            "cart detected at map=(%.2f, %.2f). exit=(%.2f, %.2f), exit_route_points=%d"
             % (
                 cart_pose.pose.position.x,
                 cart_pose.pose.position.y,
                 exit_projection["point"][0],
                 exit_projection["point"][1],
+                len(exit_route),
             )
         )
 
         self.cancel_rear_goal()
+        self.prepare_patrol_resume_after_docking(
+            "cart_detected",
+            use_active_route=True,
+        )
         self.clear_route()
         self.set_state(State.APPROACH_EXIT, "cart_detected")
         self.start_route(exit_route, "EXIT", final_yaw=exit_projection["path_yaw"])
@@ -817,14 +1004,14 @@ class AutoNavCommander(Node):
             self.schedule_front_clear()
             return
 
-        if self.state == State.WAIT_ATTACH and attached:
-            self.cancel_timer("attach_timeout")
-            self.set_cart_count(
-                self.cart_count_after_docking,
-                "docking_state_attached",
-                publish=True,
-            )
-            self.complete_scenario("attached")
+        if self.state == State.WAIT_ATTACH:
+            if attached:
+                if not self.docking_state_confirmed:
+                    self.get_logger().info("docking_state=true confirmed")
+                self.docking_state_confirmed = True
+                self.check_rl_docking_sequence_done("docking_state")
+            else:
+                self.docking_state_confirmed = False
             return
 
         if attached and self.state in (
@@ -1123,11 +1310,12 @@ class AutoNavCommander(Node):
 
         self.cancel_timer("precise_pose_timeout")
         cart_yaw = self.normalize_angle(cart_yaw)
-        offset = self.dock_goal_offset
-        rear_x = cart_x - offset * math.cos(cart_yaw)
-        rear_y = cart_y - offset * math.sin(cart_yaw)
-        front_x = cart_x + offset * math.cos(cart_yaw)
-        front_y = cart_y + offset * math.sin(cart_yaw)
+        rear_offset = self.rear_dock_goal_offset
+        front_offset = self.front_dock_goal_offset
+        rear_x = cart_x - rear_offset * math.cos(cart_yaw)
+        rear_y = cart_y - rear_offset * math.sin(cart_yaw)
+        front_x = cart_x + front_offset * math.cos(cart_yaw)
+        front_y = cart_y + front_offset * math.sin(cart_yaw)
 
         rear_goal = self.create_pose_stamped(
             rear_x,
@@ -1144,13 +1332,14 @@ class AutoNavCommander(Node):
         self.front_dock_goal_done = False
         self.dock_prep_rear_goal_retry_count = 0
         self.last_dock_prep_rear_goal = rear_goal
+        self.last_dock_prep_front_goal = front_goal
         self.publish_dock_prep_done(False)
         self.enable_navigation_control()
         self.set_state(State.DOCK_PREP, f"precise_pose:{source}")
         self.get_logger().info(
             "dock prep goals from cart=(%.2f, %.2f, %.2f): "
-            "rear=(%.2f, %.2f, %.2f), "
-            "front=(%.2f, %.2f, %.2f)"
+            "rear=(%.2f, %.2f, %.2f, offset=%.2f), "
+            "front=(%.2f, %.2f, %.2f, offset=%.2f)"
             % (
                 cart_x,
                 cart_y,
@@ -1158,9 +1347,11 @@ class AutoNavCommander(Node):
                 rear_goal.pose.position.x,
                 rear_goal.pose.position.y,
                 self.yaw_from_quaternion(rear_goal.pose.orientation),
+                rear_offset,
                 front_goal.pose.position.x,
                 front_goal.pose.position.y,
                 self.yaw_from_quaternion(front_goal.pose.orientation),
+                front_offset,
             )
         )
 
@@ -1172,9 +1363,14 @@ class AutoNavCommander(Node):
         front_sent = self.send_front_goal(front_goal, "DOCK_PREP_FRONT")
         if not rear_sent or not front_sent:
             self.abort_scenario("failed to send dock prep goals")
+            return
+
+        self.schedule_dock_prep_tf_check()
 
     def retry_dock_prep_rear_goal(self):
         if self.state != State.DOCK_PREP:
+            return
+        if self.accept_dock_prep_goal_by_tf("rear", "dock prep retry check"):
             return
         if self.last_dock_prep_rear_goal is None:
             self.abort_scenario("no rear dock prep goal to retry")
@@ -1192,9 +1388,7 @@ class AutoNavCommander(Node):
         self.cancel_rear_goal()
         self.cancel_front_goal()
         self.set_state(State.WAIT_ATTACH, "dock_prep_done")
-
-        if self.release_to_joystick_on_wait_attach:
-            self.enable_joystick_control()
+        self.enable_navigation_control()
 
         if self.pause_rear_nav2_on_dock_prep_done:
             self.pause_rear_nav2("dock_prep_done")
@@ -1207,9 +1401,7 @@ class AutoNavCommander(Node):
             )
             self.publish_bool_burst("gripper_grip", self.gripper_toggle_pub, True)
 
-        if self.is_attached:
-            self.complete_scenario("already attached")
-            return
+        self.docking_state_confirmed = bool(self.is_attached)
 
         if self.attach_timeout_sec > 0.0:
             self.schedule_once(
@@ -1219,14 +1411,14 @@ class AutoNavCommander(Node):
             )
 
         self.get_logger().info(
-            "dock prep complete. Waiting for RL docking done or "
-            "/docking_state=true."
+            "dock prep complete. Waiting for front RL done, rear RL done, "
+            "and /docking_state=true."
         )
 
     # ------------------------------------------------------------------
     # Route and action callbacks
     # ------------------------------------------------------------------
-    def start_route(self, points, route_type, final_yaw=None):
+    def start_route(self, points, route_type, final_yaw=None, patrol_start_index=0):
         poses = self.create_path_poses(points, final_yaw)
         if not poses:
             if route_type == "EXIT":
@@ -1238,12 +1430,28 @@ class AutoNavCommander(Node):
         self.active_route_type = route_type
         self.active_route_poses = poses
         self.active_route_index = 0
+        self.active_route_patrol_start_index = (
+            max(0, int(patrol_start_index)) if route_type == "PATROL" else 0
+        )
         self.route_goal_retry_count = 0
         return self.send_current_route_goal()
 
-    def send_current_route_goal(self):
+    def send_current_route_goal(self, costmaps_prepared=False):
         if self.active_route_index >= len(self.active_route_poses):
             self.finish_route()
+            return True
+
+        if (
+            not costmaps_prepared
+            and self.prepare_cart_mode_route_goal_costmaps()
+        ):
+            self.schedule_once(
+                "route_goal_costmap_settle",
+                self.rear_costmap_clear_settle_sec,
+                lambda: self.send_current_route_goal(costmaps_prepared=True)
+                if self.active_route_type is not None
+                else None,
+            )
             return True
 
         pose = self.active_route_poses[self.active_route_index]
@@ -1263,6 +1471,7 @@ class AutoNavCommander(Node):
         if not self.send_rear_goal(pose, label, self.current_behavior_tree()):
             self.handle_route_failure("failed to send route goal")
             return False
+        self.schedule_route_tf_check()
         return True
 
     def finish_route(self):
@@ -1272,6 +1481,10 @@ class AutoNavCommander(Node):
         if route_type == "PATROL":
             self.complete_scenario("patrol complete")
         elif route_type == "EXIT":
+            self.prepare_patrol_resume_after_docking(
+                "exit_reached",
+                use_active_route=False,
+            )
             self.start_detach_sequence()
 
     def send_rear_goal(self, pose: PoseStamped, label: str, behavior_tree: str):
@@ -1497,13 +1710,19 @@ class AutoNavCommander(Node):
 
         self.get_logger().info(f"rear goal succeeded: {label}")
         if label in ("ROUTE_PATROL", "ROUTE_EXIT"):
+            self.cancel_timer("route_tf_check")
             if not self.route_goal_reached_by_tf():
                 self.handle_route_failure("route waypoint TF verification failed")
                 return
             if self.active_route_type == "PATROL":
+                completed_patrol_index = (
+                    self.active_route_patrol_start_index
+                    + self.active_route_index
+                    + 1
+                )
                 self.current_patrol_waypoint_index = max(
                     self.current_patrol_waypoint_index,
-                    self.active_route_index + 1,
+                    completed_patrol_index,
                 )
             self.route_goal_retry_count = 0
             self.active_route_index += 1
@@ -1549,9 +1768,279 @@ class AutoNavCommander(Node):
             and self.rear_dock_goal_done
             and self.front_dock_goal_done
         ):
+            self.cancel_timer("dock_prep_tf_check")
             self.publish_dock_prep_done(True)
             self.publish_rl_docking_ready(True)
+            self.reset_rl_docking_sequence_state()
             self.enter_wait_attach()
+            if self.state == State.WAIT_ATTACH:
+                self.front_rl_docking_started = True
+                self.publish_front_docking_target(2)
+                self.get_logger().info(
+                    "front docking target start command published."
+                )
+
+    def schedule_dock_prep_tf_check(self):
+        if self.dock_prep_tf_check_period_sec <= 0.0:
+            return
+        self.schedule_once(
+            "dock_prep_tf_check",
+            self.dock_prep_tf_check_period_sec,
+            self.check_dock_prep_tf_fallback,
+        )
+
+    def check_dock_prep_tf_fallback(self):
+        if self.state != State.DOCK_PREP:
+            return
+
+        if not self.rear_dock_goal_done:
+            self.accept_dock_prep_goal_by_tf(
+                "rear",
+                "periodic TF check",
+                cancel_active=True,
+            )
+        if self.state != State.DOCK_PREP:
+            return
+
+        if not self.front_dock_goal_done:
+            self.accept_dock_prep_goal_by_tf(
+                "front",
+                "periodic TF check",
+                cancel_active=True,
+            )
+        if self.state == State.DOCK_PREP:
+            self.schedule_dock_prep_tf_check()
+
+    def accept_dock_prep_goal_by_tf(self, robot_name: str, reason: str, cancel_active=False):
+        if self.state != State.DOCK_PREP:
+            return False
+        if not self.dock_prep_goal_reached_by_tf(robot_name, reason):
+            return False
+
+        if cancel_active:
+            if robot_name == "front":
+                self.cancel_front_goal()
+            elif robot_name == "rear":
+                self.cancel_rear_goal()
+
+        if robot_name == "front":
+            self.front_dock_goal_done = True
+            self.active_front_goal_pending = False
+            self.active_front_goal_label = None
+            self.active_front_proxy_goal_id = 0
+        elif robot_name == "rear":
+            self.rear_dock_goal_done = True
+            self.active_rear_goal_pending = False
+            self.active_rear_goal_label = None
+        else:
+            return False
+
+        self.get_logger().info(
+            f"{robot_name} dock prep accepted by TF fallback ({reason})."
+        )
+        self.check_dock_prep_done()
+        return True
+
+    def dock_prep_goal_reached_by_tf(self, robot_name: str, reason: str):
+        if robot_name == "front":
+            goal = self.last_dock_prep_front_goal
+            frame_candidates = ("front/base_footprint", "front/base_link")
+        elif robot_name == "rear":
+            goal = self.last_dock_prep_rear_goal
+            frame_candidates = ("base_footprint", "base_link", "rear_base_link")
+        else:
+            return False
+
+        if goal is None:
+            if reason != "periodic TF check":
+                self.get_logger().warn(
+                    f"{robot_name} dock prep TF fallback unavailable: no stored goal."
+                )
+            return False
+
+        robot_pose = self.robot_pose_in_map(frame_candidates)
+        if robot_pose is None:
+            if reason != "periodic TF check":
+                self.get_logger().warn(
+                    f"{robot_name} dock prep TF fallback unavailable: TF lookup failed."
+                )
+            return False
+
+        robot_x, robot_y, robot_yaw = robot_pose
+        goal_x = goal.pose.position.x
+        goal_y = goal.pose.position.y
+        goal_yaw = self.yaw_from_quaternion(goal.pose.orientation)
+        distance = math.hypot(goal_x - robot_x, goal_y - robot_y)
+        yaw_error = abs(self.normalize_angle(goal_yaw - robot_yaw))
+
+        if (
+            distance <= self.dock_prep_tf_xy_tolerance
+            and yaw_error <= self.dock_prep_tf_yaw_tolerance
+        ):
+            self.get_logger().info(
+                "%s dock prep TF fallback ok (%s): dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
+                % (
+                    robot_name,
+                    reason,
+                    distance,
+                    self.dock_prep_tf_xy_tolerance,
+                    yaw_error,
+                    self.dock_prep_tf_yaw_tolerance,
+                )
+            )
+            return True
+
+        if reason != "periodic TF check":
+            self.get_logger().warn(
+                "%s dock prep TF fallback rejected (%s): dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
+                % (
+                    robot_name,
+                    reason,
+                    distance,
+                    self.dock_prep_tf_xy_tolerance,
+                    yaw_error,
+                    self.dock_prep_tf_yaw_tolerance,
+                )
+            )
+        return False
+
+    def reset_rl_docking_sequence_state(self):
+        self.front_rl_docking_started = False
+        self.front_rl_docking_done = False
+        self.rear_rl_docking_done = False
+        self.rear_rl_docking_started = False
+        self.docking_state_confirmed = bool(self.is_attached)
+
+    def clear_rl_docking_sequence_state(self):
+        self.front_rl_docking_started = False
+        self.front_rl_docking_done = False
+        self.rear_rl_docking_done = False
+        self.rear_rl_docking_started = False
+        self.docking_state_confirmed = bool(self.is_attached)
+
+    def check_rl_docking_sequence_done(self, reason: str):
+        if self.state != State.WAIT_ATTACH:
+            return
+
+        if not (
+            self.front_rl_docking_done
+            and self.rear_rl_docking_done
+            and self.docking_state_confirmed
+        ):
+            return
+
+        self.cancel_timer("attach_timeout")
+        self.set_cart_count(
+            self.cart_count_after_docking,
+            reason,
+            publish=True,
+        )
+        if self.resume_patrol_after_docking(reason):
+            return
+        self.complete_scenario("rl_docking_sequence_done")
+
+    def clear_patrol_resume_after_docking(self):
+        self.pending_patrol_resume_after_docking = False
+        self.resume_patrol_waypoint_index = 0
+
+    def prepare_patrol_resume_after_docking(self, reason: str, use_active_route: bool):
+        if not self.patrol_path:
+            self.clear_patrol_resume_after_docking()
+            return
+
+        if (
+            use_active_route
+            and self.active_route_type == "PATROL"
+            and self.active_route_poses
+        ):
+            index = self.active_route_patrol_start_index + self.active_route_index
+            index = max(index, self.current_patrol_waypoint_index)
+        else:
+            progress = self.current_progress_on_path()
+            index = self.next_patrol_waypoint_index_after_progress(progress)
+            index = max(index, self.current_patrol_waypoint_index)
+
+        index = max(0, min(int(index), len(self.patrol_path)))
+        if index >= len(self.patrol_path):
+            self.clear_patrol_resume_after_docking()
+            self.get_logger().info(
+                f"no remaining patrol waypoint to resume after docking ({reason})."
+            )
+            return
+
+        self.pending_patrol_resume_after_docking = True
+        self.resume_patrol_waypoint_index = index
+        self.get_logger().info(
+            "patrol resume reserved after docking: waypoint %d/%d (%s)"
+            % (index + 1, len(self.patrol_path), reason)
+        )
+
+    def resume_patrol_after_docking(self, reason: str):
+        if not self.pending_patrol_resume_after_docking:
+            return False
+
+        index = max(
+            0,
+            min(int(self.resume_patrol_waypoint_index), len(self.patrol_path)),
+        )
+        remaining = self.patrol_path[index:]
+        if not remaining:
+            self.clear_patrol_resume_after_docking()
+            self.get_logger().info("patrol route already complete after docking.")
+            return False
+
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.clear_route()
+        self.clear_precise_pose()
+        self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
+        self.clear_rl_docking_sequence_state()
+        self.enable_navigation_control()
+        self.current_patrol_waypoint_index = max(
+            self.current_patrol_waypoint_index,
+            index,
+        )
+        self.clear_patrol_resume_after_docking()
+
+        final_yaw = None
+        if len(remaining) == 1:
+            final_yaw = self.patrol_waypoint_yaw(index)
+
+        wait_for_resume = (
+            self.resume_rear_nav2_on_scenario_start and self.rear_nav2_paused
+        )
+        if self.resume_rear_nav2_on_scenario_start:
+            self.resume_rear_nav2("resume_after_docking")
+
+        self.set_state(State.PATROL, f"resume_after_docking:{reason}")
+        self.get_logger().info(
+            "resuming patrol after docking from waypoint %d/%d"
+            % (index + 1, len(self.patrol_path))
+        )
+
+        if wait_for_resume:
+            self.schedule_once(
+                "rear_nav2_resume_after_docking",
+                self.rear_nav2_resume_delay_sec,
+                lambda route=remaining, yaw=final_yaw, start=index: self.start_route(
+                    route,
+                    "PATROL",
+                    final_yaw=yaw,
+                    patrol_start_index=start,
+                )
+                if self.state == State.PATROL
+                else None,
+            )
+            return True
+
+        self.start_route(
+            remaining,
+            "PATROL",
+            final_yaw=final_yaw,
+            patrol_start_index=index,
+        )
+        return True
 
     def handle_rear_goal_failure(self, reason):
         label = self.active_rear_goal_label
@@ -1559,11 +2048,15 @@ class AutoNavCommander(Node):
         self.active_rear_goal_pending = False
 
         if label in ("ROUTE_PATROL", "ROUTE_EXIT"):
+            if self.accept_current_route_goal_by_tf(reason, cancel_active=False):
+                return
             self.handle_route_failure(reason)
         elif label == "REAR_ALIGN":
             self.get_logger().warn(reason)
             self.retry_or_abort("rear_align_goal_retry", self.start_rear_heading_alignment)
         elif label == "DOCK_PREP_REAR":
+            if self.accept_dock_prep_goal_by_tf("rear", reason):
+                return
             self.get_logger().warn(reason)
             self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
         elif label == "MANUAL":
@@ -1581,6 +2074,8 @@ class AutoNavCommander(Node):
         if label == "FRONT_CLEAR":
             self.retry_or_abort("front_clear_goal_retry", self.start_front_clear_move)
         elif label == "DOCK_PREP_FRONT":
+            if self.accept_dock_prep_goal_by_tf("front", reason):
+                return
             self.abort_scenario(reason)
         else:
             self.get_logger().warn(reason)
@@ -1598,6 +2093,14 @@ class AutoNavCommander(Node):
         if self.active_front_goal_label is None:
             return
 
+        if self.active_front_goal_label == "DOCK_PREP_FRONT":
+            if self.accept_dock_prep_goal_by_tf(
+                "front",
+                "front goal timeout",
+                cancel_active=True,
+            ):
+                return
+
         proxy_goal_id = self.active_front_proxy_goal_id
         if self.front_nav_transport == "topic_proxy" and proxy_goal_id:
             msg = String()
@@ -1610,17 +2113,35 @@ class AutoNavCommander(Node):
 
     def handle_route_failure(self, reason):
         self.route_goal_retry_count += 1
-        if self.route_goal_retry_count > self.route_goal_max_retries:
+        goal_was_rejected = "rejected" in str(reason).lower()
+        max_retries = (
+            max(self.route_goal_max_retries, self.route_goal_rejected_max_retries)
+            if goal_was_rejected
+            else self.route_goal_max_retries
+        )
+        retry_delay = (
+            max(
+                self.route_goal_retry_delay_sec,
+                self.route_goal_rejected_retry_delay_sec,
+            )
+            if goal_was_rejected
+            else self.route_goal_retry_delay_sec
+        )
+
+        if goal_was_rejected:
+            self.resume_rear_nav2("route_goal_rejected")
+
+        if self.route_goal_retry_count > max_retries:
             self.abort_scenario(reason)
             return
 
         self.get_logger().warn(
             "%s. retry route goal %d/%d"
-            % (reason, self.route_goal_retry_count, self.route_goal_max_retries)
+            % (reason, self.route_goal_retry_count, max_retries)
         )
         self.schedule_once(
             "route_goal_retry",
-            self.route_goal_retry_delay_sec,
+            retry_delay,
             self.send_current_route_goal,
         )
 
@@ -1651,7 +2172,7 @@ class AutoNavCommander(Node):
     def handle_attach_timeout(self):
         if self.state == State.WAIT_ATTACH:
             self.abort_scenario(
-                "attach timeout waiting for rl_docking_done or docking_state=true"
+                "attach timeout waiting for front/rear rl_docking_done and docking_state=true"
             )
 
     def complete_scenario(self, reason):
@@ -1663,6 +2184,8 @@ class AutoNavCommander(Node):
         self.clear_precise_pose()
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
+        self.clear_rl_docking_sequence_state()
+        self.clear_patrol_resume_after_docking()
         self.update_dynamic_state("scenario_complete")
         self.enable_joystick_control()
         self.set_state(State.IDLE, reason)
@@ -1676,6 +2199,8 @@ class AutoNavCommander(Node):
         self.clear_precise_pose()
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
+        self.clear_rl_docking_sequence_state()
+        self.clear_patrol_resume_after_docking()
         if return_joystick:
             self.enable_joystick_control()
         self.set_state(State.IDLE, "abort")
@@ -1788,10 +2313,94 @@ class AutoNavCommander(Node):
         msg.data = bool(ready)
         self.rl_docking_ready_pub.publish(msg)
 
+    def publish_rear_docking_target(self, target: int):
+        msg = Int32()
+        msg.data = int(target)
+        self.docking_target_pub.publish(msg)
+
+    def publish_front_docking_target(self, target: int):
+        msg = Int32()
+        msg.data = int(target)
+        self.front_docking_target_pub.publish(msg)
+
+    def publish_docking_target(self, target: int):
+        self.publish_rear_docking_target(target)
+        self.publish_front_docking_target(target)
+
     def publish_cart_count(self, count: int):
         msg = UInt16()
         msg.data = max(0, int(count))
         self.cart_count_pub.publish(msg)
+
+    def prepare_cart_mode_route_goal_costmaps(self):
+        if not self.clear_rear_costmaps_on_cart_mode:
+            return False
+        if not (self.is_attached and self.cart_count >= 1):
+            return False
+        if self.active_route_type != "PATROL":
+            return False
+
+        now = self.get_clock().now()
+        if self.last_rear_costmap_clear_time is not None:
+            elapsed = (
+                now - self.last_rear_costmap_clear_time
+            ).nanoseconds * 1e-9
+            if elapsed < self.rear_costmap_clear_min_interval_sec:
+                return False
+
+        if not self.clear_rear_costmaps(
+            "cart mode route goal %d/%d"
+            % (
+                self.active_route_index + 1,
+                len(self.active_route_poses),
+            )
+        ):
+            return False
+
+        self.last_rear_costmap_clear_time = now
+        return self.rear_costmap_clear_settle_sec > 0.0
+
+    def clear_rear_costmaps(self, reason: str):
+        sent = 0
+        request = ClearEntireCostmap.Request()
+        for label, client, service_name in (
+            (
+                "global",
+                self.rear_global_costmap_clear_client,
+                self.rear_global_costmap_clear_service,
+            ),
+            (
+                "local",
+                self.rear_local_costmap_clear_client,
+                self.rear_local_costmap_clear_service,
+            ),
+        ):
+            if not client.wait_for_service(
+                timeout_sec=self.rear_costmap_clear_service_timeout_sec
+            ):
+                self.get_logger().warn(
+                    f"rear {label} costmap clear service is not ready: {service_name}"
+                )
+                continue
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda fut, name=label: self.clear_costmap_callback(fut, name)
+            )
+            sent += 1
+
+        if sent > 0:
+            self.get_logger().info(
+                f"rear Nav2 costmap clear requested ({reason})"
+            )
+        return sent > 0
+
+    def clear_costmap_callback(self, future: Future, costmap_name: str):
+        try:
+            future.result()
+        except Exception as ex:
+            self.get_logger().warn(
+                f"rear {costmap_name} costmap clear failed: {ex}"
+            )
 
     def pause_rear_nav2(self, reason: str):
         self.call_rear_nav2_lifecycle(
@@ -1855,29 +2464,54 @@ class AutoNavCommander(Node):
 
     def clear_route(self):
         self.cancel_timer("route_goal_retry")
+        self.cancel_timer("route_tf_check")
+        self.cancel_timer("route_goal_costmap_settle")
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
+        self.active_route_patrol_start_index = 0
         self.route_goal_retry_count = 0
 
     def clean_points(self, points):
         clean = []
-        for x, y in points:
-            if math.isfinite(x) and math.isfinite(y):
-                clean.append((float(x), float(y)))
+        for point in points:
+            xy = self.waypoint_xy(point)
+            if xy is None:
+                continue
+            x, y = xy
+            yaw = self.waypoint_explicit_yaw(point)
+            if yaw is None:
+                clean.append((x, y))
+            else:
+                clean.append((x, y, yaw))
         return clean
 
     def create_path_poses(self, points, final_yaw=None):
         poses = []
-        for index, (x, y) in enumerate(points):
-            if index < len(points) - 1:
-                next_x, next_y = points[index + 1]
-                yaw = math.atan2(next_y - y, next_x - x)
+        for index, point in enumerate(points):
+            xy = self.waypoint_xy(point)
+            if xy is None:
+                continue
+            x, y = xy
+            explicit_yaw = self.waypoint_explicit_yaw(point)
+            if explicit_yaw is not None:
+                yaw = explicit_yaw
+            elif index < len(points) - 1:
+                next_xy = self.waypoint_xy(points[index + 1])
+                if next_xy is None:
+                    yaw = final_yaw if final_yaw is not None else 0.0
+                else:
+                    next_x, next_y = next_xy
+                    yaw = math.atan2(next_y - y, next_x - x)
             elif final_yaw is not None:
                 yaw = final_yaw
             elif index > 0:
-                prev_x, prev_y = points[index - 1]
-                yaw = math.atan2(y - prev_y, x - prev_x)
+                prev_xy = self.waypoint_xy(points[index - 1])
+                if prev_xy is None:
+                    yaw = 0.0
+                else:
+                    prev_x, prev_y = prev_xy
+                    yaw = math.atan2(y - prev_y, x - prev_x)
             else:
                 yaw = 0.0
             poses.append(self.create_pose_stamped(x, y, yaw))
@@ -1905,6 +2539,77 @@ class AutoNavCommander(Node):
             % (distance, self.route_arrival_tolerance)
         )
         return False
+
+    def schedule_route_tf_check(self):
+        if self.route_tf_check_period_sec <= 0.0:
+            return
+        if self.active_route_type not in ("PATROL", "EXIT"):
+            return
+        self.schedule_once(
+            "route_tf_check",
+            self.route_tf_check_period_sec,
+            self.check_route_tf_fallback,
+        )
+
+    def check_route_tf_fallback(self):
+        if self.active_route_type not in ("PATROL", "EXIT"):
+            return
+        if self.accept_current_route_goal_by_tf("periodic TF check"):
+            return
+        self.schedule_route_tf_check()
+
+    def accept_current_route_goal_by_tf(self, reason: str, cancel_active=True):
+        if self.active_route_type not in ("PATROL", "EXIT"):
+            return False
+        if self.active_route_index >= len(self.active_route_poses):
+            return False
+
+        robot_pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
+        if robot_pose is None:
+            return False
+
+        route_type = self.active_route_type
+        route_index = self.active_route_index
+        route_count = len(self.active_route_poses)
+        goal = self.active_route_poses[route_index]
+        distance = math.hypot(
+            goal.pose.position.x - robot_pose[0],
+            goal.pose.position.y - robot_pose[1],
+        )
+        if distance > self.route_arrival_tolerance:
+            return False
+
+        if cancel_active:
+            self.cancel_rear_goal()
+        self.cancel_timer("route_tf_check")
+        self.cancel_timer("route_goal_retry")
+
+        if route_type == "PATROL":
+            completed_patrol_index = (
+                self.active_route_patrol_start_index
+                + route_index
+                + 1
+            )
+            self.current_patrol_waypoint_index = max(
+                self.current_patrol_waypoint_index,
+                completed_patrol_index,
+            )
+
+        self.route_goal_retry_count = 0
+        self.active_route_index = route_index + 1
+        self.get_logger().info(
+            "route %s goal %d/%d accepted by TF fallback (%s): dist=%.2fm/%.2fm"
+            % (
+                route_type,
+                route_index + 1,
+                route_count,
+                reason,
+                distance,
+                self.route_arrival_tolerance,
+            )
+        )
+        self.send_current_route_goal()
+        return True
 
     # ------------------------------------------------------------------
     # Geometry and path math
@@ -1935,14 +2640,17 @@ class AutoNavCommander(Node):
             self.get_logger().warn(f"cart target TF failed: {ex}")
             return None
 
-    def pose_to_map_xy(self, pose, source_frame, label):
+    def pose_to_map_waypoint(self, pose, source_frame, label):
         if not (math.isfinite(pose.position.x) and math.isfinite(pose.position.y)):
             self.get_logger().warn(f"{label} has invalid x/y.")
             return None
 
         source_frame = self.normalize_frame_id(source_frame) or "map"
         if source_frame == "map":
-            return (float(pose.position.x), float(pose.position.y))
+            yaw = self.pose_orientation_yaw_or_none(pose)
+            if yaw is None:
+                return (float(pose.position.x), float(pose.position.y))
+            return (float(pose.position.x), float(pose.position.y), yaw)
 
         try:
             transform = self.tf_buffer.lookup_transform("map", source_frame, Time())
@@ -1951,7 +2659,131 @@ class AutoNavCommander(Node):
             self.get_logger().warn(f"{label} TF failed: {ex}")
             return None
 
-        return (float(map_pose.position.x), float(map_pose.position.y))
+        yaw = self.pose_orientation_yaw_or_none(map_pose)
+        if yaw is None:
+            return (float(map_pose.position.x), float(map_pose.position.y))
+        return (float(map_pose.position.x), float(map_pose.position.y), yaw)
+
+    def pose_to_map_xy(self, pose, source_frame, label):
+        waypoint = self.pose_to_map_waypoint(pose, source_frame, label)
+        if waypoint is None:
+            return None
+        return self.waypoint_xy(waypoint)
+
+    def waypoint_xy(self, waypoint):
+        if isinstance(waypoint, dict):
+            position = self.waypoint_position_dict(waypoint)
+            if position is None:
+                return None
+            try:
+                x = float(position.get("x"))
+                y = float(position.get("y"))
+            except (TypeError, ValueError):
+                return None
+
+            if not (math.isfinite(x) and math.isfinite(y)):
+                return None
+            return (x, y)
+
+        try:
+            if len(waypoint) < 2:
+                return None
+            x = float(waypoint[0])
+            y = float(waypoint[1])
+        except (TypeError, ValueError):
+            return None
+
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None
+        return (x, y)
+
+    def waypoint_explicit_yaw(self, waypoint):
+        if isinstance(waypoint, dict):
+            if "yaw" in waypoint:
+                try:
+                    yaw = float(waypoint["yaw"])
+                except (TypeError, ValueError):
+                    return None
+                if math.isfinite(yaw):
+                    return self.normalize_angle(yaw)
+
+            orientation = self.waypoint_orientation_dict(waypoint)
+            if orientation is None:
+                return None
+            return self.quaternion_yaw_or_none(
+                orientation.get("x", 0.0),
+                orientation.get("y", 0.0),
+                orientation.get("z", 0.0),
+                orientation.get("w", 1.0),
+            )
+
+        try:
+            if len(waypoint) < 3:
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        try:
+            if len(waypoint) == 3:
+                yaw = float(waypoint[2])
+                if math.isfinite(yaw):
+                    return self.normalize_angle(yaw)
+                return None
+
+            if len(waypoint) == 4:
+                return self.quaternion_yaw_or_none(0.0, 0.0, waypoint[2], waypoint[3])
+
+            if len(waypoint) == 6:
+                return self.quaternion_yaw_or_none(
+                    waypoint[2],
+                    waypoint[3],
+                    waypoint[4],
+                    waypoint[5],
+                )
+
+            if len(waypoint) >= 7:
+                return self.quaternion_yaw_or_none(
+                    waypoint[3],
+                    waypoint[4],
+                    waypoint[5],
+                    waypoint[6],
+                )
+        except (TypeError, ValueError):
+            return None
+
+        return None
+
+    def waypoint_position_dict(self, waypoint):
+        pose = waypoint.get("pose", waypoint)
+        return pose.get("position") if isinstance(pose, dict) else None
+
+    def waypoint_orientation_dict(self, waypoint):
+        pose = waypoint.get("pose", waypoint)
+        return pose.get("orientation") if isinstance(pose, dict) else None
+
+    def pose_orientation_yaw_or_none(self, pose):
+        q = pose.orientation
+        return self.quaternion_yaw_or_none(q.x, q.y, q.z, q.w)
+
+    def quaternion_yaw_or_none(self, qx, qy, qz, qw):
+        try:
+            qx = float(qx)
+            qy = float(qy)
+            qz = float(qz)
+            qw = float(qw)
+        except (TypeError, ValueError):
+            return None
+
+        if not all(math.isfinite(value) for value in (qx, qy, qz, qw)):
+            return None
+
+        norm_sq = qx * qx + qy * qy + qz * qz + qw * qw
+        if norm_sq <= 1e-9:
+            return None
+
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        return self.normalize_angle(math.atan2(siny_cosp, cosy_cosp))
 
     def robot_pose_in_map(self, frame_candidates):
         for frame_id in frame_candidates:
@@ -1989,8 +2821,12 @@ class AutoNavCommander(Node):
         best_dist = float("inf")
 
         for index in range(len(self.patrol_path) - 1):
-            ax, ay = self.patrol_path[index]
-            bx, by = self.patrol_path[index + 1]
+            start_xy = self.waypoint_xy(self.patrol_path[index])
+            end_xy = self.waypoint_xy(self.patrol_path[index + 1])
+            if start_xy is None or end_xy is None:
+                continue
+            ax, ay = start_xy
+            bx, by = end_xy
             ab_x = bx - ax
             ab_y = by - ay
             ab_len_sq = ab_x * ab_x + ab_y * ab_y
@@ -2021,8 +2857,8 @@ class AutoNavCommander(Node):
         if best is not None:
             return best
 
-        last_x, last_y = self.patrol_path[-1]
-        prev_x, prev_y = self.patrol_path[-2]
+        last_x, last_y = self.waypoint_xy(self.patrol_path[-1])
+        prev_x, prev_y = self.waypoint_xy(self.patrol_path[-2])
         return {
             "point": (last_x, last_y),
             "segment_index": max(0, len(self.patrol_path) - 2),
@@ -2035,6 +2871,9 @@ class AutoNavCommander(Node):
     def build_route_to_exit(self, exit_projection, current_progress):
         exit_progress = exit_projection["progress"]
         exit_point = exit_projection["point"]
+        if self.cart_exit_direct_route:
+            return [exit_point]
+
         cumulative = self.path_cumulative_lengths()
         route = []
 
@@ -2043,7 +2882,12 @@ class AutoNavCommander(Node):
             if current_progress + 0.05 < waypoint_progress < exit_progress - 0.05:
                 route.append(waypoint)
 
-        if not route or math.hypot(route[-1][0] - exit_point[0], route[-1][1] - exit_point[1]) > 0.05:
+        last_route_xy = self.waypoint_xy(route[-1]) if route else None
+        if (
+            last_route_xy is None
+            or math.hypot(last_route_xy[0] - exit_point[0], last_route_xy[1] - exit_point[1])
+            > 0.05
+        ):
             route.append(exit_point)
 
         return route
@@ -2051,8 +2895,13 @@ class AutoNavCommander(Node):
     def path_cumulative_lengths(self):
         cumulative = [0.0]
         for index in range(len(self.patrol_path) - 1):
-            ax, ay = self.patrol_path[index]
-            bx, by = self.patrol_path[index + 1]
+            start_xy = self.waypoint_xy(self.patrol_path[index])
+            end_xy = self.waypoint_xy(self.patrol_path[index + 1])
+            if start_xy is None or end_xy is None:
+                cumulative.append(cumulative[-1])
+                continue
+            ax, ay = start_xy
+            bx, by = end_xy
             cumulative.append(cumulative[-1] + math.hypot(bx - ax, by - ay))
         return cumulative
 
@@ -2061,6 +2910,31 @@ class AutoNavCommander(Node):
             return 0.0
         cumulative = self.path_cumulative_lengths()
         return cumulative[min(waypoint_index, len(cumulative) - 1)]
+
+    def next_patrol_waypoint_index_after_progress(self, progress: float):
+        cumulative = self.path_cumulative_lengths()
+        for index, waypoint_progress in enumerate(cumulative):
+            if waypoint_progress > progress + 0.05:
+                return index
+        return len(cumulative)
+
+    def patrol_waypoint_yaw(self, waypoint_index: int):
+        if len(self.patrol_path) < 2:
+            return 0.0
+
+        waypoint_index = max(0, min(int(waypoint_index), len(self.patrol_path) - 1))
+        explicit_yaw = self.waypoint_explicit_yaw(self.patrol_path[waypoint_index])
+        if explicit_yaw is not None:
+            return explicit_yaw
+
+        if waypoint_index < len(self.patrol_path) - 1:
+            x0, y0 = self.waypoint_xy(self.patrol_path[waypoint_index])
+            x1, y1 = self.waypoint_xy(self.patrol_path[waypoint_index + 1])
+            return math.atan2(y1 - y0, x1 - x0)
+
+        x0, y0 = self.waypoint_xy(self.patrol_path[waypoint_index - 1])
+        x1, y1 = self.waypoint_xy(self.patrol_path[waypoint_index])
+        return math.atan2(y1 - y0, x1 - x0)
 
     def pose2d_to_map_pose(self, msg: Pose2D):
         frame_id = self.precise_pose2d_frame
