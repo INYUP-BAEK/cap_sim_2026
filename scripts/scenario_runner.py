@@ -89,6 +89,9 @@ class AutoNavCommander(Node):
                 ("scenario2_front_wait_clear_distance", 0.8),
                 ("scenario2_front_wait_clear_timeout_sec", 0.0),
                 ("scenario2_rear_cart_rejoin_back_distance", 1.0),
+                ("rear_cart_rejoin_tf_xy_tolerance", 0.45),
+                ("rear_cart_rejoin_tf_yaw_tolerance", 0.50),
+                ("rear_cart_rejoin_tf_check_period_sec", 0.5),
                 ("front_clear_speed", 0.12),
                 ("front_clear_timeout_sec", 8.0),
                 ("publish_front_initial_pose_before_clear", True),
@@ -251,6 +254,18 @@ class AutoNavCommander(Node):
         self.scenario2_rear_cart_rejoin_back_distance = max(
             0.0,
             self.param_float("scenario2_rear_cart_rejoin_back_distance", 1.0),
+        )
+        self.rear_cart_rejoin_tf_xy_tolerance = max(
+            0.01,
+            self.param_float("rear_cart_rejoin_tf_xy_tolerance", 0.45),
+        )
+        self.rear_cart_rejoin_tf_yaw_tolerance = max(
+            0.01,
+            self.param_float("rear_cart_rejoin_tf_yaw_tolerance", 0.80),
+        )
+        self.rear_cart_rejoin_tf_check_period_sec = max(
+            0.0,
+            self.param_float("rear_cart_rejoin_tf_check_period_sec", 0.5),
         )
         self.front_clear_speed = max(0.01, self.param_float("front_clear_speed", 0.12))
         self.front_clear_timeout_sec = self.param_float("front_clear_timeout_sec", 8.0)
@@ -518,6 +533,7 @@ class AutoNavCommander(Node):
         self.pending_precise_pose_type = None
         self.last_dock_prep_rear_goal = None
         self.last_dock_prep_front_goal = None
+        self.last_rear_cart_rejoin_goal = None
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.last_cart_goal_time = None
@@ -944,8 +960,8 @@ class AutoNavCommander(Node):
         if self.rear_cart_attached:
             return (
                 {
-                    "max_velocity": [0.0, 0.0, 0.30],
-                    "min_velocity": [-0.12, 0.0, -0.30],
+                    "max_velocity": [0.0, 0.0, 0.35],
+                    "min_velocity": [-0.12, 0.0, -0.35],
                     "max_accel": [0.20, 0.0, 1.0],
                     "max_decel": [-0.20, 0.0, -1.0],
                 },
@@ -2013,6 +2029,7 @@ class AutoNavCommander(Node):
         goal_x = x - back_distance * math.cos(yaw)
         goal_y = y - back_distance * math.sin(yaw)
         goal = self.create_pose_stamped(goal_x, goal_y, yaw)
+        self.last_rear_cart_rejoin_goal = goal
         self.set_state(State.REAR_CART_REJOIN, "rear_cart_attached")
         self.enable_navigation_control()
         self.update_dynamic_state("rear_cart_rejoin_start")
@@ -2055,11 +2072,102 @@ class AutoNavCommander(Node):
         ):
             self.abort_scenario("failed to send rear cart rejoin goal")
             return False
+        self.schedule_rear_cart_rejoin_tf_check()
         return True
+
+    def schedule_rear_cart_rejoin_tf_check(self):
+        if self.rear_cart_rejoin_tf_check_period_sec <= 0.0:
+            return
+        self.schedule_once(
+            "rear_cart_rejoin_tf_check",
+            self.rear_cart_rejoin_tf_check_period_sec,
+            self.check_rear_cart_rejoin_tf_fallback,
+        )
+
+    def check_rear_cart_rejoin_tf_fallback(self):
+        if self.state != State.REAR_CART_REJOIN:
+            return
+        if self.accept_rear_cart_rejoin_by_tf(
+            "periodic TF check",
+            cancel_active=True,
+        ):
+            return
+        self.schedule_rear_cart_rejoin_tf_check()
+
+    def accept_rear_cart_rejoin_by_tf(self, reason: str, cancel_active=False):
+        if self.state != State.REAR_CART_REJOIN:
+            return False
+        if not self.rear_cart_rejoin_goal_reached_by_tf(reason):
+            return False
+
+        if cancel_active:
+            self.cancel_rear_goal()
+        self.cancel_timer("rear_cart_rejoin_tf_check")
+        self.cancel_timer("rear_cart_rejoin_costmap_settle")
+        self.get_logger().info(
+            "rear cart rejoin accepted by TF fallback (%s)." % reason
+        )
+        self.enter_wait_front_attach()
+        return True
+
+    def rear_cart_rejoin_goal_reached_by_tf(self, reason: str):
+        goal = self.last_rear_cart_rejoin_goal
+        if goal is None:
+            if reason != "periodic TF check":
+                self.get_logger().warn("rear cart rejoin TF fallback unavailable: no goal.")
+            return False
+
+        robot_pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
+        if robot_pose is None:
+            if reason != "periodic TF check":
+                self.get_logger().warn(
+                    "rear cart rejoin TF fallback unavailable: TF lookup failed."
+                )
+            return False
+
+        robot_x, robot_y, robot_yaw = robot_pose
+        goal_x = goal.pose.position.x
+        goal_y = goal.pose.position.y
+        goal_yaw = self.yaw_from_quaternion(goal.pose.orientation)
+        distance = math.hypot(goal_x - robot_x, goal_y - robot_y)
+        yaw_error = abs(self.normalize_angle(goal_yaw - robot_yaw))
+
+        if (
+            distance <= self.rear_cart_rejoin_tf_xy_tolerance
+            and yaw_error <= self.rear_cart_rejoin_tf_yaw_tolerance
+        ):
+            self.get_logger().info(
+                "rear cart rejoin TF fallback ok (%s): "
+                "dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
+                % (
+                    reason,
+                    distance,
+                    self.rear_cart_rejoin_tf_xy_tolerance,
+                    yaw_error,
+                    self.rear_cart_rejoin_tf_yaw_tolerance,
+                )
+            )
+            return True
+
+        if reason != "periodic TF check":
+            self.get_logger().warn(
+                "rear cart rejoin TF fallback rejected (%s): "
+                "dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
+                % (
+                    reason,
+                    distance,
+                    self.rear_cart_rejoin_tf_xy_tolerance,
+                    yaw_error,
+                    self.rear_cart_rejoin_tf_yaw_tolerance,
+                )
+            )
+        return False
 
     def enter_wait_front_attach(self):
         self.cancel_rear_goal()
         self.cancel_front_goal()
+        self.cancel_timer("rear_cart_rejoin_tf_check")
+        self.cancel_timer("rear_cart_rejoin_costmap_settle")
         self.clear_precise_pose()
         self.scenario2_front_attach_retry_count = 0
         self.set_state(State.WAIT_FRONT_ATTACH, "rear_cart_rejoined")
@@ -2252,6 +2360,7 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
+        self.last_rear_cart_rejoin_goal = None
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
@@ -2779,6 +2888,7 @@ class AutoNavCommander(Node):
                     % self.state.value
                 )
                 return
+            self.cancel_timer("rear_cart_rejoin_tf_check")
             self.enter_wait_front_attach()
         elif label == "REJOIN_REAR":
             if self.state != State.ROBOT_REJOIN:
@@ -3110,6 +3220,7 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
+        self.last_rear_cart_rejoin_goal = None
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
@@ -3212,6 +3323,8 @@ class AutoNavCommander(Node):
                     "rear cart rejoin failure ignored because state=%s: %s"
                     % (self.state.value, reason)
                 )
+                return
+            if self.accept_rear_cart_rejoin_by_tf(reason, cancel_active=False):
                 return
             self.abort_scenario(reason)
         elif label == "REJOIN_REAR":
@@ -3445,6 +3558,7 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
+        self.last_rear_cart_rejoin_goal = None
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()

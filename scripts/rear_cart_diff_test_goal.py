@@ -284,8 +284,8 @@ class RearCartDiffTestGoal(Node):
 
     def set_rear_cart_velocity_limits(self):
         params = {
-            "max_velocity": [0.0, 0.0, 0.30],
-            "min_velocity": [-0.12, 0.0, -0.30],
+            "max_velocity": [0.0, 0.0, 0.35],
+            "min_velocity": [-0.12, 0.0, -0.35],
             "max_accel": [0.20, 0.0, 1.0],
             "max_decel": [-0.20, 0.0, -1.0],
         }
