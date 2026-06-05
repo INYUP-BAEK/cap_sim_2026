@@ -727,6 +727,22 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     def docking_callback(self, msg: Bool):
         next_attached = bool(msg.data)
+        if self.should_ignore_docking_state_for_rear_cart(next_attached):
+            if self.is_attached:
+                self.is_attached = False
+                self.get_logger().warn(
+                    "forcing is_attached=false because scenario 2 rear-cart "
+                    "pull-out is a detached differential state."
+                )
+                self.update_dynamic_state("rear_cart_docking_state_filter")
+            else:
+                self.publish_footprints()
+            self.get_logger().warn(
+                f"docking_state=true ignored during {self.state.value}; "
+                "rear-cart pull-out keeps /docking_state=false until front attach."
+            )
+            return
+
         if self.is_attached != next_attached:
             self.is_attached = next_attached
             self.get_logger().info(f"docking_state -> attached={self.is_attached}")
@@ -735,6 +751,18 @@ class AutoNavCommander(Node):
             self.publish_footprints()
 
         self.handle_docking_transition(next_attached)
+
+    def should_ignore_docking_state_for_rear_cart(self, attached: bool):
+        if not attached:
+            return False
+        if self.active_scenario_id != 2:
+            return False
+        return self.state in (
+            State.REAR_CART_PREP,
+            State.WAIT_REAR_CART_ATTACH,
+            State.REAR_CART_GRIP_SETTLE,
+            State.REAR_CART_REJOIN,
+        )
 
     def cart_count_callback(self, msg: UInt16):
         if self.cart_count == msg.data:
@@ -879,12 +907,22 @@ class AutoNavCommander(Node):
 
     def set_rear_cart_attached(self, attached: bool, reason: str):
         next_attached = bool(attached)
+        forced_detached = False
+        if next_attached and self.is_attached:
+            self.is_attached = False
+            forced_detached = True
+            self.get_logger().warn(
+                "rear_cart_attached=true requires is_attached=false; "
+                "forcing detached differential state."
+            )
+
         changed = self.rear_cart_attached != next_attached
         self.rear_cart_attached = next_attached
         if changed:
             self.get_logger().info(
                 f"rear_cart_attached -> {self.rear_cart_attached} ({reason})"
             )
+        if changed or forced_detached:
             self.update_dynamic_state(reason)
         else:
             self.publish_footprints()
@@ -903,6 +941,17 @@ class AutoNavCommander(Node):
         self.get_logger().info(f"dynamic update ({reason}): {mode}")
 
     def current_velocity_params(self):
+        if self.rear_cart_attached:
+            return (
+                {
+                    "max_velocity": [0.0, 0.0, 0.30],
+                    "min_velocity": [-0.12, 0.0, -0.30],
+                    "max_accel": [0.20, 0.0, 1.0],
+                    "max_decel": [-0.20, 0.0, -1.0],
+                },
+                "differential rear-cart mode",
+            )
+
         if self.is_attached and self.cart_count >= 1:
             return (
                 {
@@ -923,17 +972,6 @@ class AutoNavCommander(Node):
                     "max_decel": [-0.5, 0.0, -1.2],
                 },
                 "ackermann direct mode",
-            )
-
-        if self.rear_cart_attached:
-            return (
-                {
-                    "max_velocity": [0.0, 0.0, 0.30],
-                    "min_velocity": [-0.12, 0.0, -0.30],
-                    "max_accel": [0.20, 0.0, 1.0],
-                    "max_decel": [-0.20, 0.0, -1.0],
-                },
-                "differential rear-cart mode",
             )
 
         return (
@@ -957,18 +995,18 @@ class AutoNavCommander(Node):
         rear_width = 0.25
         rear_bumper_x = -0.3
 
-        if self.is_attached:
-            rear_front_x = self.wheelbase_from_cart_count(self.cart_count) + 0.3
-            return (
-                self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
-                self.create_polygon(0.01, -0.01, 0.01),
-            )
-
         if self.rear_cart_attached:
             rear_front_x = self.wheelbase_from_cart_count(1) + 0.3
             return (
                 self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
                 self.create_polygon(0.3, -0.3, 0.25),
+            )
+
+        if self.is_attached:
+            rear_front_x = self.wheelbase_from_cart_count(self.cart_count) + 0.3
+            return (
+                self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
+                self.create_polygon(0.01, -0.01, 0.01),
             )
 
         return (
@@ -1977,17 +2015,47 @@ class AutoNavCommander(Node):
         goal = self.create_pose_stamped(goal_x, goal_y, yaw)
         self.set_state(State.REAR_CART_REJOIN, "rear_cart_attached")
         self.enable_navigation_control()
+        self.update_dynamic_state("rear_cart_rejoin_start")
         self.get_logger().info(
             "scenario 2 rear cart rejoin goal: x=%.2f, y=%.2f, yaw=%.2f "
             "(detach=(%.2f, %.2f), back_distance=%.2f)"
             % (goal_x, goal_y, yaw, x, y, back_distance)
         )
+        self.send_rear_cart_rejoin_goal(goal)
+
+    def send_rear_cart_rejoin_goal(self, goal: PoseStamped, costmaps_prepared=False):
+        if self.state != State.REAR_CART_REJOIN:
+            return False
+
+        if not costmaps_prepared and self.clear_rear_costmaps_on_cart_mode:
+            self.publish_footprints()
+            if self.clear_rear_costmaps("rear cart rejoin"):
+                settle = max(0.0, self.rear_costmap_clear_settle_sec)
+                if settle > 0.0:
+                    self.get_logger().info(
+                        "waiting %.2fs after rear-cart costmap clear before rejoin goal."
+                        % settle
+                    )
+                    self.schedule_once(
+                        "rear_cart_rejoin_costmap_settle",
+                        settle,
+                        lambda g=goal: self.send_rear_cart_rejoin_goal(
+                            g,
+                            costmaps_prepared=True,
+                        )
+                        if self.state == State.REAR_CART_REJOIN
+                        else None,
+                    )
+                    return True
+
         if not self.send_rear_goal(
             goal,
             "REAR_CART_REJOIN",
             self.rear_cart_diff_bt_path,
         ):
             self.abort_scenario("failed to send rear cart rejoin goal")
+            return False
+        return True
 
     def enter_wait_front_attach(self):
         self.cancel_rear_goal()
@@ -4309,7 +4377,7 @@ class AutoNavCommander(Node):
             self.get_logger().warn(f"{node_name} rejected parameters: {failed}")
 
     def current_behavior_tree(self):
-        if self.rear_cart_attached and not self.is_attached:
+        if self.rear_cart_attached:
             return self.rear_cart_diff_bt_path
         if not self.is_attached:
             return self.diff_bt_path

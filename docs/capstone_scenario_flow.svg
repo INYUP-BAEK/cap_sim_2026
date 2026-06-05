@@ -1,173 +1,159 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="960" viewBox="0 0 1600 960">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
   <defs>
     <style>
-      .bg { fill: #f7f8fb; }
-      .title { font: 700 34px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
-      .subtitle { font: 400 18px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #4b5563; }
-      .lane-title { font: 700 22px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
-      .step-title { font: 700 18px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
-      .step-text { font: 400 14px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #374151; }
-      .mode-title { font: 700 17px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
-      .mode-text { font: 400 13px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #374151; }
-      .small { font: 500 13px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #4b5563; }
-      .lane1 { fill: #eef6ff; stroke: #bfdbfe; stroke-width: 1.5; }
-      .lane2 { fill: #f1f8f3; stroke: #bbf7d0; stroke-width: 1.5; }
-      .box { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
-      .nav { fill: #eaf2ff; stroke: #5b8def; }
-      .vision { fill: #eefbf4; stroke: #34a853; }
-      .dock { fill: #fff4e6; stroke: #f59e0b; }
-      .carry { fill: #f4efff; stroke: #8b5cf6; }
-      .recovery { fill: #fff1f2; stroke: #fb7185; }
-      .line { stroke: #6b7280; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
-      .line-blue { stroke: #3b82f6; stroke-width: 2.4; fill: none; marker-end: url(#arrow-blue); }
-      .line-green { stroke: #22c55e; stroke-width: 2.4; fill: none; marker-end: url(#arrow-green); }
-      .line-orange { stroke: #f59e0b; stroke-width: 2.4; fill: none; marker-end: url(#arrow-orange); }
-      .dash { stroke-dasharray: 7 6; }
+      .bg { fill: #f6f8fb; }
+      .title { font: 800 46px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 500 24px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #374151; }
+      .scenario-title { font: 800 32px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
+      .step-no { font: 800 22px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .step-title { font: 800 30px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
+      .step-text { font: 600 22px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #374151; }
+      .mode-title { font: 800 26px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #111827; }
+      .mode-text { font: 600 19px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #374151; }
+      .tag { font: 800 19px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #ffffff; }
+      .note { font: 700 20px "Noto Sans CJK KR", "Noto Sans KR", Arial, sans-serif; fill: #4b5563; }
+      .lane1 { fill: #eaf3ff; stroke: #93c5fd; stroke-width: 2; }
+      .lane2 { fill: #ecfdf3; stroke: #86efac; stroke-width: 2; }
+      .panel { fill: #ffffff; stroke: #d1d5db; stroke-width: 2; }
+      .step-blue { fill: #ffffff; stroke: #3b82f6; stroke-width: 3; }
+      .step-green { fill: #ffffff; stroke: #22c55e; stroke-width: 3; }
+      .step-orange { fill: #ffffff; stroke: #f59e0b; stroke-width: 3; }
+      .step-purple { fill: #ffffff; stroke: #8b5cf6; stroke-width: 3; }
+      .num-blue { fill: #2563eb; }
+      .num-green { fill: #16a34a; }
+      .num-orange { fill: #d97706; }
+      .num-purple { fill: #7c3aed; }
+      .line { stroke: #475569; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .line-blue { stroke: #2563eb; stroke-width: 4; fill: none; marker-end: url(#arrow-blue); }
+      .line-green { stroke: #16a34a; stroke-width: 4; fill: none; marker-end: url(#arrow-green); }
+      .line-orange { stroke: #d97706; stroke-width: 4; fill: none; marker-end: url(#arrow-orange); }
     </style>
-    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#6b7280"/>
+    <marker id="arrow" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto">
+      <path d="M2,2 L12,7.5 L2,13 Z" fill="#475569"/>
     </marker>
-    <marker id="arrow-blue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#3b82f6"/>
+    <marker id="arrow-blue" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto">
+      <path d="M2,2 L12,7.5 L2,13 Z" fill="#2563eb"/>
     </marker>
-    <marker id="arrow-green" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#22c55e"/>
+    <marker id="arrow-green" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto">
+      <path d="M2,2 L12,7.5 L2,13 Z" fill="#16a34a"/>
     </marker>
-    <marker id="arrow-orange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M2,2 L10,6 L2,10 Z" fill="#f59e0b"/>
+    <marker id="arrow-orange" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto">
+      <path d="M2,2 L12,7.5 L2,13 Z" fill="#d97706"/>
     </marker>
   </defs>
 
-  <rect class="bg" width="1600" height="960"/>
+  <rect class="bg" width="1600" height="900"/>
 
-  <text class="title" x="64" y="58">자율 쇼핑카트 수거 로봇 시나리오 플로우</text>
-  <text class="subtitle" x="64" y="88">두 대의 차동구동 로봇이 결합 상태를 바꾸며 Ackermann / Differential / Long Ackermann 주행을 전환한다.</text>
+  <text class="title" x="60" y="70">자율 쇼핑카트 수거 로봇 전체 파이프라인</text>
+  <text class="subtitle" x="60" y="110">두 로봇의 결합 상태를 바꾸며 Nav2 주행 모드를 전환하고, 카트를 목적지까지 운반</text>
 
-  <g transform="translate(1055,38)">
-    <rect x="0" y="0" width="20" height="12" rx="3" fill="#eaf2ff" stroke="#5b8def"/>
-    <text class="small" x="28" y="11">Nav2 경로주행</text>
-    <rect x="140" y="0" width="20" height="12" rx="3" fill="#eefbf4" stroke="#34a853"/>
-    <text class="small" x="168" y="11">비전/자세추정</text>
-    <rect x="300" y="0" width="20" height="12" rx="3" fill="#fff4e6" stroke="#f59e0b"/>
-    <text class="small" x="328" y="11">도킹/결합</text>
+  <!-- Scenario 1 -->
+  <rect class="lane1" x="50" y="150" width="1500" height="255" rx="18"/>
+  <text class="scenario-title" x="80" y="198">시나리오 1  |  지정 수거장소의 카트 묶음 회수</text>
+
+  <g transform="translate(80,225)">
+    <rect class="step-blue" x="0" y="0" width="295" height="130" rx="16"/>
+    <circle class="num-blue" cx="35" cy="35" r="22"/>
+    <text class="step-no" x="28" y="43">1</text>
+    <text class="step-title" x="70" y="43">수거장소 이동</text>
+    <text class="step-text" x="30" y="82">직결 Ackermann</text>
+    <text class="step-text" x="30" y="112">Nav2 waypoint 주행</text>
+
+    <rect class="step-green" x="365" y="0" width="295" height="130" rx="16"/>
+    <circle class="num-green" cx="400" cy="35" r="22"/>
+    <text class="step-no" x="393" y="43">2</text>
+    <text class="step-title" x="435" y="43">카트 자세 추정</text>
+    <text class="step-text" x="395" y="82">로봇 분리</text>
+    <text class="step-text" x="395" y="112">ArUco 정밀 인식</text>
+
+    <rect class="step-orange" x="730" y="0" width="295" height="130" rx="16"/>
+    <circle class="num-orange" cx="765" cy="35" r="22"/>
+    <text class="step-no" x="758" y="43">3</text>
+    <text class="step-title" x="800" y="43">앞뒤 동시 결합</text>
+    <text class="step-text" x="760" y="82">front / rear 접근</text>
+    <text class="step-text" x="760" y="112">카트 묶음 3대 결합</text>
+
+    <rect class="step-purple" x="1095" y="0" width="325" height="130" rx="16"/>
+    <circle class="num-purple" cx="1130" cy="35" r="22"/>
+    <text class="step-no" x="1123" y="43">4</text>
+    <text class="step-title" x="1165" y="43">목적지 복귀</text>
+    <text class="step-text" x="1125" y="82">Long Ackermann</text>
+    <text class="step-text" x="1125" y="112">카트 묶음 운반</text>
+
+    <path class="line-blue" d="M295,65 H350"/>
+    <path class="line-green" d="M660,65 H715"/>
+    <path class="line-orange" d="M1025,65 H1080"/>
   </g>
 
-  <!-- Scenario 1 lane -->
-  <rect class="lane1" x="48" y="130" width="1504" height="245" rx="8"/>
-  <text class="lane-title" x="76" y="168">시나리오 1: 지정 수거장소의 카트 묶음 회수</text>
-  <text class="subtitle" x="76" y="197">카트 수거장소의 global 위치를 알고 있으며, 현장에서 정밀 자세를 다시 추정한 뒤 카트 묶음을 한 번에 운반한다.</text>
+  <!-- Scenario 2 -->
+  <rect class="lane2" x="50" y="435" width="1500" height="285" rx="18"/>
+  <text class="scenario-title" x="80" y="483">시나리오 2  |  주행 중 발견한 단일 카트 회수</text>
 
-  <g transform="translate(76,225)">
-    <rect class="box nav" x="0" y="0" width="185" height="96" rx="8"/>
-    <text class="step-title" x="18" y="31">1. 출발</text>
-    <text class="step-text" x="18" y="57">front+rear 직결</text>
-    <text class="step-text" x="18" y="78">Ackermann 주행</text>
+  <g transform="translate(80,510)">
+    <rect class="step-blue" x="0" y="0" width="255" height="140" rx="16"/>
+    <circle class="num-blue" cx="35" cy="35" r="22"/>
+    <text class="step-no" x="28" y="43">1</text>
+    <text class="step-title" x="70" y="43">순찰 주행</text>
+    <text class="step-text" x="30" y="84">직결 Ackermann</text>
+    <text class="step-text" x="30" y="116">waypoint 순회</text>
 
-    <rect class="box nav" x="230" y="0" width="185" height="96" rx="8"/>
-    <text class="step-title" x="248" y="31">2. 수거장소 이동</text>
-    <text class="step-text" x="248" y="57">알려진 위치의</text>
-    <text class="step-text" x="248" y="78">이탈점까지 주행</text>
+    <rect class="step-green" x="305" y="0" width="255" height="140" rx="16"/>
+    <circle class="num-green" cx="340" cy="35" r="22"/>
+    <text class="step-no" x="333" y="43">2</text>
+    <text class="step-title" x="375" y="43">카트 발견</text>
+    <text class="step-text" x="335" y="84">비전 인식</text>
+    <text class="step-text" x="335" y="116">이탈점 이동</text>
 
-    <rect class="box vision" x="460" y="0" width="185" height="96" rx="8"/>
-    <text class="step-title" x="478" y="31">3. 현장 인식</text>
-    <text class="step-text" x="478" y="57">분리 후 ArUco로</text>
-    <text class="step-text" x="478" y="78">카트 자세 추정</text>
+    <rect class="step-orange" x="610" y="0" width="255" height="140" rx="16"/>
+    <circle class="num-orange" cx="645" cy="35" r="22"/>
+    <text class="step-no" x="638" y="43">3</text>
+    <text class="step-title" x="680" y="43">rear 선결합</text>
+    <text class="step-text" x="640" y="84">카트 손잡이 접근</text>
+    <text class="step-text" x="640" y="116">주행공간으로 견인</text>
 
-    <rect class="box dock" x="690" y="0" width="185" height="96" rx="8"/>
-    <text class="step-title" x="708" y="31">4. 양방향 접근</text>
-    <text class="step-text" x="708" y="57">front/rear가</text>
-    <text class="step-text" x="708" y="78">카트 앞뒤로 접근</text>
+    <rect class="step-orange" x="915" y="0" width="255" height="140" rx="16"/>
+    <circle class="num-orange" cx="950" cy="35" r="22"/>
+    <text class="step-no" x="943" y="43">4</text>
+    <text class="step-title" x="985" y="43">front 추가 결합</text>
+    <text class="step-text" x="945" y="84">카트를 사이에 둔</text>
+    <text class="step-text" x="945" y="116">긴 차체 구성</text>
 
-    <rect class="box dock" x="920" y="0" width="185" height="96" rx="8"/>
-    <text class="step-title" x="938" y="31">5. 카트 묶음 결합</text>
-    <text class="step-text" x="938" y="57">카트 3대를 포함한</text>
-    <text class="step-text" x="938" y="78">긴 차체 구성</text>
+    <rect class="step-purple" x="1220" y="0" width="255" height="140" rx="16"/>
+    <circle class="num-purple" cx="1255" cy="35" r="22"/>
+    <text class="step-no" x="1248" y="43">5</text>
+    <text class="step-title" x="1290" y="43">목적지 복귀</text>
+    <text class="step-text" x="1250" y="84">Long Ackermann</text>
+    <text class="step-text" x="1250" y="116">단일 카트 운반</text>
 
-    <rect class="box carry" x="1150" y="0" width="245" height="96" rx="8"/>
-    <text class="step-title" x="1168" y="31">6. 목적지 복귀</text>
-    <text class="step-text" x="1168" y="57">Long Ackermann으로</text>
-    <text class="step-text" x="1168" y="78">남은 waypoint 주행</text>
-
-    <path class="line-blue" d="M185,48 H220"/>
-    <path class="line-blue" d="M415,48 H450"/>
-    <path class="line-green" d="M645,48 H680"/>
-    <path class="line-orange" d="M875,48 H910"/>
-    <path class="line-orange" d="M1105,48 H1140"/>
+    <path class="line-blue" d="M255,70 H290"/>
+    <path class="line-green" d="M560,70 H595"/>
+    <path class="line-orange" d="M865,70 H900"/>
+    <path class="line-orange" d="M1170,70 H1205"/>
   </g>
 
-  <!-- Scenario 2 lane -->
-  <rect class="lane2" x="48" y="415" width="1504" height="290" rx="8"/>
-  <text class="lane-title" x="76" y="453">시나리오 2: 주행 중 발견한 단일 카트 회수</text>
-  <text class="subtitle" x="76" y="482">카트 위치를 미리 알 수 없으므로, 주행 중 비전 인식 후 rear가 먼저 카트를 끌어내고 front가 나중에 결합한다.</text>
+  <!-- Nav2 summary -->
+  <rect class="panel" x="50" y="755" width="1500" height="105" rx="18"/>
+  <text class="mode-title" x="80" y="795">Nav2 주행 모드 전환</text>
 
-  <g transform="translate(76,515)">
-    <rect class="box nav" x="0" y="0" width="168" height="96" rx="8"/>
-    <text class="step-title" x="18" y="31">1. 순찰 주행</text>
-    <text class="step-text" x="18" y="57">직결 Ackermann</text>
-    <text class="step-text" x="18" y="78">waypoint 순회</text>
+  <g transform="translate(315,770)">
+    <rect x="0" y="0" width="245" height="56" rx="14" fill="#eaf3ff" stroke="#3b82f6" stroke-width="2"/>
+    <text class="mode-text" x="24" y="35">직결 Ackermann</text>
 
-    <rect class="box vision" x="205" y="0" width="168" height="96" rx="8"/>
-    <text class="step-title" x="223" y="31">2. 카트 발견</text>
-    <text class="step-text" x="223" y="57">비전으로 global</text>
-    <text class="step-text" x="223" y="78">카트 위치 획득</text>
+    <path class="line" d="M255,28 H300"/>
 
-    <rect class="box nav" x="410" y="0" width="168" height="96" rx="8"/>
-    <text class="step-title" x="428" y="31">3. 이탈점 이동</text>
-    <text class="step-text" x="428" y="57">기존 경로상</text>
-    <text class="step-text" x="428" y="78">가까운 지점 이동</text>
+    <rect x="310" y="0" width="245" height="56" rx="14" fill="#ffffff" stroke="#64748b" stroke-width="2"/>
+    <text class="mode-text" x="350" y="35">분리 Differential</text>
 
-    <rect class="box dock" x="615" y="0" width="168" height="96" rx="8"/>
-    <text class="step-title" x="633" y="31">4. rear 단독 결합</text>
-    <text class="step-text" x="633" y="57">카트 손잡이 쪽</text>
-    <text class="step-text" x="633" y="78">후방 접근</text>
+    <path class="line" d="M565,28 H610"/>
 
-    <rect class="box nav" x="820" y="0" width="190" height="96" rx="8"/>
-    <text class="step-title" x="838" y="31">5. 카트 끌어내기</text>
-    <text class="step-text" x="838" y="57">rear+cart 모델로</text>
-    <text class="step-text" x="838" y="78">주행공간 복귀</text>
+    <rect x="620" y="0" width="265" height="56" rx="14" fill="#fff7ed" stroke="#f59e0b" stroke-width="2"/>
+    <text class="mode-text" x="647" y="35">rear+cart Differential</text>
 
-    <rect class="box dock" x="1047" y="0" width="168" height="96" rx="8"/>
-    <text class="step-title" x="1065" y="31">6. front 추가 결합</text>
-    <text class="step-text" x="1065" y="57">카트를 사이에 둔</text>
-    <text class="step-text" x="1065" y="78">긴 차체 완성</text>
+    <path class="line" d="M895,28 H940"/>
 
-    <rect class="box carry" x="1252" y="0" width="190" height="96" rx="8"/>
-    <text class="step-title" x="1270" y="31">7. 목적지 복귀</text>
-    <text class="step-text" x="1270" y="57">Long Ackermann</text>
-    <text class="step-text" x="1270" y="78">남은 waypoint 주행</text>
-
-    <path class="line-green" d="M168,48 H195"/>
-    <path class="line-blue" d="M373,48 H400"/>
-    <path class="line-blue" d="M578,48 H605"/>
-    <path class="line-orange" d="M783,48 H810"/>
-    <path class="line-blue" d="M1010,48 H1037"/>
-    <path class="line-orange" d="M1215,48 H1242"/>
-
-    <path class="line dash" d="M699,104 C699,146 915,146 915,104"/>
-    <text class="small" x="732" y="156">좁은 공간에서는 rear가 먼저 카트를 꺼낸 뒤 front가 결합</text>
+    <rect x="950" y="0" width="245" height="56" rx="14" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="2"/>
+    <text class="mode-text" x="982" y="35">Long Ackermann</text>
   </g>
 
-  <!-- Nav2 role summary -->
-  <rect x="48" y="745" width="1504" height="150" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
-  <text class="lane-title" x="76" y="783">Nav2가 담당하는 주행 구간</text>
-
-  <g transform="translate(76,805)">
-    <rect class="box nav" x="0" y="0" width="330" height="66" rx="8"/>
-    <text class="mode-title" x="18" y="27">직결 Ackermann</text>
-    <text class="mode-text" x="18" y="49">출발, waypoint 순찰, 수거장소/이탈점 이동</text>
-
-    <rect class="box nav" x="370" y="0" width="330" height="66" rx="8"/>
-    <text class="mode-title" x="388" y="27">분리 Differential</text>
-    <text class="mode-text" x="388" y="49">로봇 분리 후 정렬, 카트 접근 준비 자세 이동</text>
-
-    <rect class="box nav" x="740" y="0" width="330" height="66" rx="8"/>
-    <text class="mode-title" x="758" y="27">rear + cart Differential</text>
-    <text class="mode-text" x="758" y="49">시나리오 2에서 카트를 끌어내는 복귀 주행</text>
-
-    <rect class="box carry" x="1110" y="0" width="330" height="66" rx="8"/>
-    <text class="mode-title" x="1128" y="27">Long Ackermann</text>
-    <text class="mode-text" x="1128" y="49">카트 결합 후 최종 목적지까지 안정 운반</text>
-  </g>
-
-  <text class="small" x="64" y="930">발표용 요약: 세부 토픽/플래그 대신 결합 형태, 인식 방식, Nav2 주행 모드 전환 중심으로 압축한 플로우.</text>
+  <text class="note" x="80" y="882">발표 포인트: 카트 위치를 아는 경우는 양쪽 동시 결합, 모르는 경우는 rear가 먼저 끌어낸 뒤 front가 결합한다.</text>
 </svg>
