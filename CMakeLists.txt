@@ -18,6 +18,7 @@ install(DIRECTORY
   rviz
   bt_xml
   scripts
+  docs
   DESTINATION share/${PROJECT_NAME}
 )
 
