@@ -112,12 +112,15 @@ class AutoNavCommander(Node):
                 ("scenario2_front_attach_retry_delay_sec", 2.0),
                 ("rear_cart_grip_settle_delay_sec", 3.0),
                 ("front_goal_timeout_sec", 30.0),
+                ("dock_prep_front_goal_timeout_sec", 90.0),
                 ("dock_goal_offset", 1.5),
                 ("rear_dock_goal_offset", 1.5),
                 ("front_dock_goal_offset", 1.0),
                 ("rear_final_yaw_tolerance", 0.08),
                 ("dock_prep_tf_xy_tolerance", 0.20),
                 ("dock_prep_tf_yaw_tolerance", 0.35),
+                ("dock_prep_start_xy_tolerance", 0.35),
+                ("dock_prep_start_yaw_tolerance", 0.80),
                 ("dock_prep_tf_check_period_sec", 0.5),
                 ("precise_pose2d_frame", "base_link"),
                 ("cart_marker_front_back_offset_m", 0.30),
@@ -326,6 +329,10 @@ class AutoNavCommander(Node):
             self.param_float("rear_cart_grip_settle_delay_sec", 1.0),
         )
         self.front_goal_timeout_sec = self.param_float("front_goal_timeout_sec", 30.0)
+        self.dock_prep_front_goal_timeout_sec = self.param_float(
+            "dock_prep_front_goal_timeout_sec",
+            90.0,
+        )
         self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
         self.rear_dock_goal_offset = max(
             0.0,
@@ -346,6 +353,14 @@ class AutoNavCommander(Node):
         self.dock_prep_tf_yaw_tolerance = max(
             0.01,
             self.param_float("dock_prep_tf_yaw_tolerance", 0.35),
+        )
+        self.dock_prep_start_xy_tolerance = max(
+            self.dock_prep_tf_xy_tolerance,
+            self.param_float("dock_prep_start_xy_tolerance", 0.35),
+        )
+        self.dock_prep_start_yaw_tolerance = max(
+            self.dock_prep_tf_yaw_tolerance,
+            self.param_float("dock_prep_start_yaw_tolerance", 0.80),
         )
         self.dock_prep_tf_check_period_sec = max(
             0.0,
@@ -898,7 +913,11 @@ class AutoNavCommander(Node):
 
         if not self.rear_rl_docking_started:
             self.rear_rl_docking_started = True
-            self.publish_rear_docking_target(2)
+            self.publish_int_burst(
+                "scenario1_rear_attach_start",
+                self.docking_target_pub,
+                2,
+            )
             self.get_logger().info(
                 "front RL docking complete. Rear docking target start command published."
             )
@@ -1997,7 +2016,11 @@ class AutoNavCommander(Node):
         self.set_state(State.WAIT_REAR_CART_ATTACH, "rear_cart_prep_done")
         self.enable_navigation_control()
         self.rear_rl_docking_started = True
-        self.publish_rear_docking_target(2)
+        self.publish_int_burst(
+            "scenario2_rear_cart_attach_start",
+            self.docking_target_pub,
+            2,
+        )
 
         if self.attach_timeout_sec > 0.0:
             self.schedule_once(
@@ -2972,7 +2995,11 @@ class AutoNavCommander(Node):
             self.enter_wait_attach()
             if self.state == State.WAIT_ATTACH:
                 self.front_rl_docking_started = True
-                self.publish_front_docking_target(2)
+                self.publish_int_burst(
+                    "scenario1_front_attach_start",
+                    self.front_docking_target_pub,
+                    2,
+                )
                 self.get_logger().info(
                     "front docking target start command published."
                 )
@@ -3017,10 +3044,19 @@ class AutoNavCommander(Node):
         if self.state == State.DOCK_PREP:
             self.schedule_dock_prep_tf_check()
 
-    def accept_dock_prep_goal_by_tf(self, robot_name: str, reason: str, cancel_active=False):
+    def accept_dock_prep_goal_by_tf(
+        self,
+        robot_name: str,
+        reason: str,
+        cancel_active=False,
+    ):
         if self.state != State.DOCK_PREP:
             return False
-        if not self.dock_prep_goal_reached_by_tf(robot_name, reason):
+        if not self.dock_prep_goal_reached_by_tf(
+            robot_name,
+            reason,
+            allow_start_tolerance=True,
+        ):
             return False
 
         if cancel_active:
@@ -3047,10 +3083,47 @@ class AutoNavCommander(Node):
         self.check_dock_prep_done()
         return True
 
+    def accept_all_dock_prep_goals_by_tf(
+        self,
+        reason: str,
+        cancel_active=False,
+        required_robot=None,
+    ):
+        if self.state != State.DOCK_PREP:
+            return False
+
+        if not self.rear_dock_goal_done:
+            self.accept_dock_prep_goal_by_tf(
+                "rear",
+                reason,
+                cancel_active=cancel_active,
+            )
+        if self.state != State.DOCK_PREP:
+            return True
+
+        if not self.front_dock_goal_done:
+            self.accept_dock_prep_goal_by_tf(
+                "front",
+                reason,
+                cancel_active=cancel_active,
+            )
+
+        if self.state != State.DOCK_PREP:
+            return True
+        if required_robot == "rear":
+            return self.rear_dock_goal_done
+        if required_robot == "front":
+            return self.front_dock_goal_done
+        return self.rear_dock_goal_done or self.front_dock_goal_done
+
     def accept_rear_cart_prep_by_tf(self, reason: str, cancel_active=False):
         if self.state != State.REAR_CART_PREP:
             return False
-        if not self.dock_prep_goal_reached_by_tf("rear", reason):
+        if not self.dock_prep_goal_reached_by_tf(
+            "rear",
+            reason,
+            allow_start_tolerance=False,
+        ):
             return False
 
         if cancel_active:
@@ -3065,7 +3138,12 @@ class AutoNavCommander(Node):
         self.enter_wait_rear_cart_attach()
         return True
 
-    def dock_prep_goal_reached_by_tf(self, robot_name: str, reason: str):
+    def dock_prep_goal_reached_by_tf(
+        self,
+        robot_name: str,
+        reason: str,
+        allow_start_tolerance=False,
+    ):
         if robot_name == "front":
             goal = self.last_dock_prep_front_goal
             frame_candidates = ("front/base_footprint", "front/base_link")
@@ -3097,33 +3175,63 @@ class AutoNavCommander(Node):
         distance = math.hypot(goal_x - robot_x, goal_y - robot_y)
         yaw_error = abs(self.normalize_angle(goal_yaw - robot_yaw))
 
-        if (
+        strict_ok = (
             distance <= self.dock_prep_tf_xy_tolerance
             and yaw_error <= self.dock_prep_tf_yaw_tolerance
-        ):
+        )
+        start_ok = (
+            allow_start_tolerance
+            and distance <= self.dock_prep_start_xy_tolerance
+            and yaw_error <= self.dock_prep_start_yaw_tolerance
+        )
+
+        if strict_ok or start_ok:
+            tolerance_mode = "strict" if strict_ok else "start"
+            xy_tolerance = (
+                self.dock_prep_tf_xy_tolerance
+                if strict_ok
+                else self.dock_prep_start_xy_tolerance
+            )
+            yaw_tolerance = (
+                self.dock_prep_tf_yaw_tolerance
+                if strict_ok
+                else self.dock_prep_start_yaw_tolerance
+            )
             self.get_logger().info(
-                "%s dock prep TF fallback ok (%s): dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
+                "%s dock prep TF fallback ok (%s, %s): "
+                "dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
                 % (
                     robot_name,
                     reason,
+                    tolerance_mode,
                     distance,
-                    self.dock_prep_tf_xy_tolerance,
+                    xy_tolerance,
                     yaw_error,
-                    self.dock_prep_tf_yaw_tolerance,
+                    yaw_tolerance,
                 )
             )
             return True
 
         if reason != "periodic TF check":
+            xy_tolerance = (
+                self.dock_prep_start_xy_tolerance
+                if allow_start_tolerance
+                else self.dock_prep_tf_xy_tolerance
+            )
+            yaw_tolerance = (
+                self.dock_prep_start_yaw_tolerance
+                if allow_start_tolerance
+                else self.dock_prep_tf_yaw_tolerance
+            )
             self.get_logger().warn(
                 "%s dock prep TF fallback rejected (%s): dist=%.2fm/%.2fm, yaw=%.2frad/%.2frad"
                 % (
                     robot_name,
                     reason,
                     distance,
-                    self.dock_prep_tf_xy_tolerance,
+                    xy_tolerance,
                     yaw_error,
-                    self.dock_prep_tf_yaw_tolerance,
+                    yaw_tolerance,
                 )
             )
         return False
@@ -3302,7 +3410,11 @@ class AutoNavCommander(Node):
                     % (self.state.value, reason)
                 )
                 return
-            if self.accept_dock_prep_goal_by_tf("rear", reason):
+            if self.accept_all_dock_prep_goals_by_tf(
+                reason,
+                cancel_active=False,
+                required_robot="rear",
+            ):
                 return
             self.get_logger().warn(reason)
             self.retry_or_abort("dock_prep_rear_goal_retry", self.retry_dock_prep_rear_goal)
@@ -3373,7 +3485,11 @@ class AutoNavCommander(Node):
                     % (self.state.value, reason)
                 )
                 return
-            if self.accept_dock_prep_goal_by_tf("front", reason):
+            if self.accept_all_dock_prep_goals_by_tf(
+                reason,
+                cancel_active=False,
+                required_robot="front",
+            ):
                 return
             self.abort_scenario(reason)
         elif label == "REJOIN_FRONT":
@@ -3388,11 +3504,15 @@ class AutoNavCommander(Node):
             self.get_logger().warn(reason)
 
     def schedule_front_goal_timeout(self):
-        if self.front_goal_timeout_sec <= 0.0:
+        timeout_sec = self.front_goal_timeout_sec
+        if self.active_front_goal_label == "DOCK_PREP_FRONT":
+            timeout_sec = self.dock_prep_front_goal_timeout_sec
+
+        if timeout_sec <= 0.0:
             return
         self.schedule_once(
             "front_goal_timeout",
-            self.front_goal_timeout_sec,
+            timeout_sec,
             self.handle_front_goal_timeout,
         )
 
@@ -3401,10 +3521,10 @@ class AutoNavCommander(Node):
             return
 
         if self.active_front_goal_label == "DOCK_PREP_FRONT":
-            if self.accept_dock_prep_goal_by_tf(
-                "front",
+            if self.accept_all_dock_prep_goals_by_tf(
                 "front goal timeout",
                 cancel_active=True,
+                required_robot="front",
             ):
                 return
 
@@ -3722,13 +3842,31 @@ class AutoNavCommander(Node):
             self.active_front_goal_handle = None
 
     def publish_dock_prep_done(self, done: bool):
+        if done:
+            self.publish_bool_burst(
+                "dock_prep_done",
+                self.dock_prep_done_pub,
+                True,
+            )
+            return
+
+        self.cancel_timer("dock_prep_done")
         msg = Bool()
-        msg.data = bool(done)
+        msg.data = False
         self.dock_prep_done_pub.publish(msg)
 
     def publish_rl_docking_ready(self, ready: bool):
+        if ready:
+            self.publish_bool_burst(
+                "rl_docking_ready",
+                self.rl_docking_ready_pub,
+                True,
+            )
+            return
+
+        self.cancel_timer("rl_docking_ready")
         msg = Bool()
-        msg.data = bool(ready)
+        msg.data = False
         self.rl_docking_ready_pub.publish(msg)
 
     def publish_rear_docking_target(self, target: int):
