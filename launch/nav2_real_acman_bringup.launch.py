@@ -16,7 +16,7 @@ def generate_launch_description():
         'config',
         'nav2_real_acman_params_combine.yaml',
     )
-    map_file = os.path.join(cap_sim_dir, 'maps', '320.yaml')
+    map_file = os.path.join(cap_sim_dir, 'maps', 'parking_map.yaml')
     rviz_config_file = os.path.join(cap_sim_dir, 'rviz', 'my.rviz')
 
     use_sim_time_bool = False
