@@ -82,8 +82,14 @@ class AutoNavCommander(Node):
                 ("state_max_retries", 8),
                 ("tf_retry_delay_sec", 0.5),
                 ("route_arrival_tolerance", 0.35),
+                ("cart_mode_route_arrival_tolerance", 0.55),
+                ("cart_mode_use_midpoint_tracking", True),
+                ("cart_mode_tracking_offset_m", 0.0),
+                ("cart_mode_tracking_offset_ratio", 0.5),
                 ("route_tf_check_period_sec", 0.5),
                 ("cart_exit_direct_route", False),
+                ("cart_exit_endpoint_handoff_tolerance", 1.0),
+                ("cart_exit_min_goal_spacing", 0.6),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_distance", 0.8),
@@ -234,12 +240,38 @@ class AutoNavCommander(Node):
             "route_arrival_tolerance",
             0.35,
         )
+        self.cart_mode_route_arrival_tolerance = max(
+            self.route_arrival_tolerance,
+            self.param_float("cart_mode_route_arrival_tolerance", 0.55),
+        )
+        self.cart_mode_use_midpoint_tracking = bool(
+            self.get_parameter("cart_mode_use_midpoint_tracking").value
+        )
+        self.cart_mode_tracking_offset_m = self.param_float(
+            "cart_mode_tracking_offset_m",
+            0.0,
+        )
+        self.cart_mode_tracking_offset_ratio = min(
+            1.0,
+            max(
+                0.0,
+                float(self.get_parameter("cart_mode_tracking_offset_ratio").value),
+            ),
+        )
         self.route_tf_check_period_sec = max(
             0.0,
             self.param_float("route_tf_check_period_sec", 0.5),
         )
         self.cart_exit_direct_route = bool(
             self.get_parameter("cart_exit_direct_route").value
+        )
+        self.cart_exit_endpoint_handoff_tolerance = max(
+            0.0,
+            self.param_float("cart_exit_endpoint_handoff_tolerance", 1.0),
+        )
+        self.cart_exit_min_goal_spacing = max(
+            0.0,
+            self.param_float("cart_exit_min_goal_spacing", 0.6),
         )
         self.front_clear_after_detach_delay_sec = self.param_float(
             "front_clear_after_detach_delay_sec",
@@ -763,19 +795,20 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     def docking_callback(self, msg: Bool):
         next_attached = bool(msg.data)
-        if self.should_ignore_docking_state_for_rear_cart(next_attached):
+        ignore_reason = self.docking_state_ignore_reason(next_attached)
+        if ignore_reason:
             if self.is_attached:
                 self.is_attached = False
                 self.get_logger().warn(
-                    "forcing is_attached=false because scenario 2 rear-cart "
-                    "pull-out is a detached differential state."
+                    "forcing is_attached=false because the current scenario stage "
+                    "is still a detached navigation stage."
                 )
-                self.update_dynamic_state("rear_cart_docking_state_filter")
+                self.update_dynamic_state("docking_state_filter")
             else:
                 self.publish_footprints()
             self.get_logger().warn(
                 f"docking_state=true ignored during {self.state.value}; "
-                "rear-cart pull-out keeps /docking_state=false until front attach."
+                f"{ignore_reason}"
             )
             return
 
@@ -788,17 +821,24 @@ class AutoNavCommander(Node):
 
         self.handle_docking_transition(next_attached)
 
-    def should_ignore_docking_state_for_rear_cart(self, attached: bool):
+    def docking_state_ignore_reason(self, attached: bool):
         if not attached:
-            return False
-        if self.active_scenario_id != 2:
-            return False
-        return self.state in (
+            return None
+        if self.state in (
+            State.FRONT_CLEAR,
+            State.REAR_ALIGN,
+            State.WAIT_PRECISE_POSE,
+            State.REAR_CART_PREP,
+        ):
+            return "waiting for planned cart-approach sequence before attach."
+        if self.active_scenario_id == 2 and self.state in (
             State.REAR_CART_PREP,
             State.WAIT_REAR_CART_ATTACH,
             State.REAR_CART_GRIP_SETTLE,
             State.REAR_CART_REJOIN,
-        )
+        ):
+            return "rear-cart pull-out keeps /docking_state=false until front attach."
+        return None
 
     def cart_count_callback(self, msg: UInt16):
         if self.cart_count == msg.data:
@@ -995,10 +1035,10 @@ class AutoNavCommander(Node):
         if self.is_attached and self.cart_count >= 1:
             return (
                 {
-                    "max_velocity": [0.18, 0.0, 0.55],
-                    "min_velocity": [-0.1, 0.0, -0.55],
-                    "max_accel": [0.12, 0.0, 0.25],
-                    "max_decel": [-0.15, 0.0, -0.3],
+                    "max_velocity": [0.14, 0.0, 0.65],
+                    "min_velocity": [-0.08, 0.0, -0.65],
+                    "max_accel": [0.08, 0.0, 0.25],
+                    "max_decel": [-0.12, 0.0, -0.30],
                 },
                 f"ackermann cart mode ({self.cart_count} cart)",
             )
@@ -1016,8 +1056,8 @@ class AutoNavCommander(Node):
 
         return (
             {
-                "max_velocity": [0.35, 0.0, 1.2],
-                "min_velocity": [-0.35, 0.0, -1.2],
+                "max_velocity": [0.20, 0.0, 0.80],
+                "min_velocity": [-0.05, 0.0, -0.80],
                 "max_accel": [0.5, 0.0, 6.0],
                 "max_decel": [-0.5, 0.0, -6.0],
             },
@@ -1244,21 +1284,24 @@ class AutoNavCommander(Node):
         self.detected_cart_pose = self.create_pose_stamped(station_x, station_y, 0.0)
 
         current_progress = self.current_progress_on_path()
-        exit_projection = self.closest_point_on_path(
+        exit_projection = self.closest_exit_projection_on_path(
             station_x,
             station_y,
-            min_progress=current_progress + 0.05,
+            min_progress=current_progress,
         )
         exit_route = self.build_route_to_exit(exit_projection, current_progress)
 
         self.get_logger().info(
             "scenario 1 cart station=(%.2f, %.2f). exit=(%.2f, %.2f), "
-            "exit_route_points=%d"
+            "segment=%d, t=%.2f, source=%s, exit_route_points=%d"
             % (
                 station_x,
                 station_y,
                 exit_projection["point"][0],
                 exit_projection["point"][1],
+                exit_projection["segment_index"],
+                exit_projection["t"],
+                exit_projection.get("projection_source", "path_projection"),
                 len(exit_route),
             )
         )
@@ -1305,9 +1348,28 @@ class AutoNavCommander(Node):
         else:
             distance_to_cart = math.hypot(msg.point.x, msg.point.y)
 
-        if distance_to_cart <= self.cart_stop_distance():
+        current_progress = self.current_progress_on_path()
+        exit_projection = self.closest_exit_projection_on_path(
+            cart_pose.pose.position.x,
+            cart_pose.pose.position.y,
+            min_progress=current_progress,
+        )
+
+        distance_to_exit = None
+        if robot_xy is not None:
+            distance_to_exit = math.hypot(
+                exit_projection["point"][0] - robot_xy[0],
+                exit_projection["point"][1] - robot_xy[1],
+            )
+
+        if (
+            distance_to_cart <= self.cart_stop_distance()
+            and distance_to_exit is not None
+            and distance_to_exit <= self.route_arrival_tolerance
+        ):
             self.get_logger().info(
-                "cart target is close enough; starting detach sequence from current area."
+                "cart target and path exit are close enough; "
+                "starting detach sequence from current area."
             )
             self.prepare_patrol_resume_after_docking(
                 "cart close",
@@ -1318,21 +1380,20 @@ class AutoNavCommander(Node):
             self.start_detach_sequence()
             return
 
-        current_progress = self.current_progress_on_path()
-        exit_projection = self.closest_point_on_path(
-            cart_pose.pose.position.x,
-            cart_pose.pose.position.y,
-            min_progress=current_progress + 0.05,
-        )
         exit_route = self.build_route_to_exit(exit_projection, current_progress)
 
         self.get_logger().info(
-            "cart detected at map=(%.2f, %.2f). exit=(%.2f, %.2f), exit_route_points=%d"
+            "cart detected at map=(%.2f, %.2f). exit=(%.2f, %.2f), "
+            "segment=%d, t=%.2f, source=%s, exit_to_robot=%s, exit_route_points=%d"
             % (
                 cart_pose.pose.position.x,
                 cart_pose.pose.position.y,
                 exit_projection["point"][0],
                 exit_projection["point"][1],
+                exit_projection["segment_index"],
+                exit_projection["t"],
+                exit_projection.get("projection_source", "path_projection"),
+                "unknown" if distance_to_exit is None else f"{distance_to_exit:.2f}m",
                 len(exit_route),
             )
         )
@@ -1486,24 +1547,12 @@ class AutoNavCommander(Node):
             )
             return
 
-        if attached and self.state in (
-            State.FRONT_CLEAR,
-            State.REAR_ALIGN,
-            State.WAIT_PRECISE_POSE,
-            State.DOCK_PREP,
-            State.REAR_CART_PREP,
-            State.WAIT_REAR_CART_ATTACH,
-            State.REAR_CART_REJOIN,
-        ):
+        if attached and self.state == State.DOCK_PREP:
+            self.docking_state_confirmed = True
             self.get_logger().warn(
-                f"docking_state=true during {self.state.value}; finishing scenario early."
+                "docking_state=true during DOCK_PREP; "
+                "recording it but waiting for planned dock-prep completion."
             )
-            self.set_cart_count(
-                self.scenario_cart_count_after_docking(),
-                "manual_attach",
-                publish=True,
-            )
-            self.complete_scenario("manual attach")
             return
 
         if (not attached) and self.state in (State.PATROL, State.APPROACH_EXIT):
@@ -2516,8 +2565,16 @@ class AutoNavCommander(Node):
         self.enable_navigation_control()
         self.front_rl_docking_started = True
         self.rear_rl_docking_started = True
-        self.publish_front_docking_target(1)
-        self.publish_rear_docking_target(1)
+        self.publish_int_burst(
+            "robot_rejoin_front_attach_start",
+            self.front_docking_target_pub,
+            1,
+        )
+        self.publish_int_burst(
+            "robot_rejoin_rear_attach_start",
+            self.docking_target_pub,
+            1,
+        )
 
         if self.attach_timeout_sec > 0.0:
             self.schedule_once(
@@ -2595,19 +2652,36 @@ class AutoNavCommander(Node):
 
         pose = self.active_route_poses[self.active_route_index]
         pose.header.stamp = self.get_clock().now().to_msg()
+        nav_pose, tracking_offset = self.route_nav_goal_pose(pose)
         self.update_dynamic_state("route_goal")
 
         label = f"ROUTE_{self.active_route_type}"
-        self.get_logger().info(
-            "route %s goal %d/%d"
-            % (
-                self.active_route_type,
-                self.active_route_index + 1,
-                len(self.active_route_poses),
+        if tracking_offset > 0.0:
+            self.get_logger().info(
+                "route %s midpoint goal %d/%d: tracking_offset=%.2fm, "
+                "midpoint=(%.2f, %.2f), nav_goal=(%.2f, %.2f)"
+                % (
+                    self.active_route_type,
+                    self.active_route_index + 1,
+                    len(self.active_route_poses),
+                    tracking_offset,
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    nav_pose.pose.position.x,
+                    nav_pose.pose.position.y,
+                )
             )
-        )
+        else:
+            self.get_logger().info(
+                "route %s goal %d/%d"
+                % (
+                    self.active_route_type,
+                    self.active_route_index + 1,
+                    len(self.active_route_poses),
+                )
+            )
 
-        if not self.send_rear_goal(pose, label, self.current_behavior_tree()):
+        if not self.send_rear_goal(nav_pose, label, self.current_behavior_tree()):
             self.handle_route_failure("failed to send route goal")
             return False
         self.schedule_route_tf_check()
@@ -4094,22 +4168,23 @@ class AutoNavCommander(Node):
         if self.active_route_index >= len(self.active_route_poses):
             return True
 
-        robot_pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
-        if robot_pose is None:
+        tracking_pose = self.route_tracking_pose_in_map()
+        if tracking_pose is None:
             self.get_logger().warn("route success accepted without TF verification.")
             return True
 
         goal = self.active_route_poses[self.active_route_index]
         distance = math.hypot(
-            goal.pose.position.x - robot_pose[0],
-            goal.pose.position.y - robot_pose[1],
+            goal.pose.position.x - tracking_pose[0],
+            goal.pose.position.y - tracking_pose[1],
         )
-        if distance <= self.route_arrival_tolerance:
+        tolerance = self.current_route_arrival_tolerance()
+        if distance <= tolerance:
             return True
 
         self.get_logger().warn(
             "route goal result succeeded but TF distance is %.2fm (tol %.2fm)"
-            % (distance, self.route_arrival_tolerance)
+            % (distance, tolerance)
         )
         return False
 
@@ -4137,8 +4212,8 @@ class AutoNavCommander(Node):
         if self.active_route_index >= len(self.active_route_poses):
             return False
 
-        robot_pose = self.robot_pose_in_map(("base_footprint", "base_link", "rear_base_link"))
-        if robot_pose is None:
+        tracking_pose = self.route_tracking_pose_in_map()
+        if tracking_pose is None:
             return False
 
         route_type = self.active_route_type
@@ -4146,10 +4221,11 @@ class AutoNavCommander(Node):
         route_count = len(self.active_route_poses)
         goal = self.active_route_poses[route_index]
         distance = math.hypot(
-            goal.pose.position.x - robot_pose[0],
-            goal.pose.position.y - robot_pose[1],
+            goal.pose.position.x - tracking_pose[0],
+            goal.pose.position.y - tracking_pose[1],
         )
-        if distance > self.route_arrival_tolerance:
+        tolerance = self.current_route_arrival_tolerance()
+        if distance > tolerance:
             return False
 
         if cancel_active:
@@ -4178,11 +4254,68 @@ class AutoNavCommander(Node):
                 route_count,
                 reason,
                 distance,
-                self.route_arrival_tolerance,
+                tolerance,
             )
         )
         self.send_current_route_goal()
         return True
+
+    def current_route_arrival_tolerance(self):
+        if self.is_attached and self.cart_count >= 1:
+            return self.cart_mode_route_arrival_tolerance
+        return self.route_arrival_tolerance
+
+    def cart_mode_midpoint_tracking_active(self):
+        return (
+            self.cart_mode_use_midpoint_tracking
+            and self.is_attached
+            and self.cart_count >= 1
+        )
+
+    def cart_mode_tracking_offset(self):
+        if not self.cart_mode_midpoint_tracking_active():
+            return 0.0
+        if self.cart_mode_tracking_offset_m > 0.0:
+            return self.cart_mode_tracking_offset_m
+        return (
+            self.wheelbase_from_cart_count(self.cart_count)
+            * self.cart_mode_tracking_offset_ratio
+        )
+
+    def route_nav_goal_pose(self, tracking_goal: PoseStamped):
+        offset = self.cart_mode_tracking_offset()
+        if offset <= 0.0:
+            return tracking_goal, 0.0
+
+        yaw = self.yaw_from_quaternion(tracking_goal.pose.orientation)
+        nav_x = tracking_goal.pose.position.x - offset * math.cos(yaw)
+        nav_y = tracking_goal.pose.position.y - offset * math.sin(yaw)
+        nav_goal = self.create_pose_stamped(
+            nav_x,
+            nav_y,
+            yaw,
+            tracking_goal.header.frame_id,
+        )
+        nav_goal.header.stamp = tracking_goal.header.stamp
+        return nav_goal, offset
+
+    def route_tracking_pose_in_map(self):
+        robot_pose = self.robot_pose_in_map(
+            ("base_footprint", "base_link", "rear_base_link")
+        )
+        if robot_pose is None:
+            return None
+
+        offset = self.cart_mode_tracking_offset()
+        if offset <= 0.0:
+            return robot_pose
+
+        x, y, yaw = robot_pose
+        return (
+            x + offset * math.cos(yaw),
+            y + offset * math.sin(yaw),
+            yaw,
+        )
 
     # ------------------------------------------------------------------
     # Geometry and path math
@@ -4378,15 +4511,91 @@ class AutoNavCommander(Node):
 
     def current_progress_on_path(self):
         fallback = self.waypoint_progress(self.current_patrol_waypoint_index - 1)
-        robot_xy = self.get_robot_xy_in_map()
-        if robot_xy is None:
+        robot_pose = self.route_tracking_pose_in_map()
+        if robot_pose is None:
             return fallback
         projection = self.closest_point_on_path(
-            robot_xy[0],
-            robot_xy[1],
+            robot_pose[0],
+            robot_pose[1],
             min_progress=fallback,
         )
         return projection["progress"]
+
+    def project_point_to_path_segment(self, target_x, target_y, index, cumulative=None):
+        if index < 0 or index >= len(self.patrol_path) - 1:
+            return None
+
+        start_xy = self.waypoint_xy(self.patrol_path[index])
+        end_xy = self.waypoint_xy(self.patrol_path[index + 1])
+        if start_xy is None or end_xy is None:
+            return None
+
+        ax, ay = start_xy
+        bx, by = end_xy
+        ab_x = bx - ax
+        ab_y = by - ay
+        ab_len_sq = ab_x * ab_x + ab_y * ab_y
+        if ab_len_sq <= 1e-9:
+            return None
+
+        raw_t = ((target_x - ax) * ab_x + (target_y - ay) * ab_y) / ab_len_sq
+        t = max(0.0, min(1.0, raw_t))
+        ab_len = math.sqrt(ab_len_sq)
+        if cumulative is None:
+            cumulative = self.path_cumulative_lengths()
+        progress = cumulative[index] + t * ab_len
+        x = ax + t * ab_x
+        y = ay + t * ab_y
+        return {
+            "point": (x, y),
+            "segment_index": index,
+            "raw_t": raw_t,
+            "t": t,
+            "progress": progress,
+            "distance": math.hypot(target_x - x, target_y - y),
+            "path_yaw": math.atan2(ab_y, ab_x),
+            "segment_length": ab_len,
+        }
+
+    def project_point_to_path_segment_at_t(
+        self,
+        target_x,
+        target_y,
+        index,
+        t,
+        cumulative=None,
+    ):
+        if index < 0 or index >= len(self.patrol_path) - 1:
+            return None
+
+        start_xy = self.waypoint_xy(self.patrol_path[index])
+        end_xy = self.waypoint_xy(self.patrol_path[index + 1])
+        if start_xy is None or end_xy is None:
+            return None
+
+        ax, ay = start_xy
+        bx, by = end_xy
+        ab_x = bx - ax
+        ab_y = by - ay
+        ab_len = math.hypot(ab_x, ab_y)
+        if ab_len <= 1e-9:
+            return None
+
+        t = max(0.0, min(1.0, float(t)))
+        if cumulative is None:
+            cumulative = self.path_cumulative_lengths()
+        x = ax + t * ab_x
+        y = ay + t * ab_y
+        return {
+            "point": (x, y),
+            "segment_index": index,
+            "raw_t": t,
+            "t": t,
+            "progress": cumulative[index] + t * ab_len,
+            "distance": math.hypot(target_x - x, target_y - y),
+            "path_yaw": math.atan2(ab_y, ab_x),
+            "segment_length": ab_len,
+        }
 
     def closest_point_on_path(self, target_x, target_y, min_progress=0.0):
         cumulative = self.path_cumulative_lengths()
@@ -4440,6 +4649,203 @@ class AutoNavCommander(Node):
             "distance": math.hypot(target_x - last_x, target_y - last_y),
             "path_yaw": math.atan2(last_y - prev_y, last_x - prev_x),
         }
+
+    def mark_exit_projection(self, projection, source, endpoint_eps=1e-3):
+        if projection is None:
+            return None
+        projection["projection_source"] = source
+        projection["is_endpoint_projection"] = (
+            projection["t"] <= endpoint_eps
+            or projection["t"] >= 1.0 - endpoint_eps
+        )
+        return projection
+
+    def handoff_exit_endpoint_to_next_segment(
+        self,
+        projection,
+        target_x,
+        target_y,
+        cumulative,
+        min_progress,
+        endpoint_eps=1e-3,
+    ):
+        if projection is None:
+            return None
+        if not projection.get("is_endpoint_projection", False):
+            return projection
+        if projection["t"] < 1.0 - endpoint_eps:
+            return projection
+
+        next_segment_index = projection["segment_index"] + 1
+        if next_segment_index >= len(self.patrol_path) - 1:
+            return projection
+
+        next_projection = self.project_point_to_path_segment(
+            target_x,
+            target_y,
+            next_segment_index,
+            cumulative,
+        )
+        if next_projection is None:
+            return projection
+        if next_projection["progress"] + 1e-6 < min_progress:
+            return projection
+        if (
+            next_projection["distance"]
+            > projection["distance"] + self.cart_exit_endpoint_handoff_tolerance
+        ):
+            return projection
+
+        return self.mark_exit_projection(
+            next_projection,
+            "continuous_path_next_segment_handoff",
+            endpoint_eps,
+        )
+
+    def enforce_exit_min_goal_spacing(
+        self,
+        projection,
+        target_x,
+        target_y,
+        cumulative,
+        min_progress,
+        endpoint_eps=1e-3,
+    ):
+        if projection is None or self.cart_exit_min_goal_spacing <= 0.0:
+            return projection
+
+        segment_index = projection["segment_index"]
+        if segment_index < 0 or segment_index >= len(cumulative) - 1:
+            return projection
+
+        segment_start_progress = cumulative[segment_index]
+        if segment_start_progress <= min_progress + 0.05:
+            return projection
+
+        distance_from_segment_start = projection["progress"] - segment_start_progress
+        if distance_from_segment_start >= self.cart_exit_min_goal_spacing:
+            return projection
+
+        segment_length = projection.get("segment_length", 0.0)
+        if segment_length <= 1e-9:
+            return projection
+
+        forced_t = min(1.0, self.cart_exit_min_goal_spacing / segment_length)
+        if forced_t <= projection["t"] + 1e-6:
+            return projection
+
+        adjusted = self.project_point_to_path_segment_at_t(
+            target_x,
+            target_y,
+            segment_index,
+            forced_t,
+            cumulative,
+        )
+        if adjusted is None:
+            return projection
+
+        return self.mark_exit_projection(
+            adjusted,
+            f"{projection.get('projection_source', 'path_projection')}_min_spacing",
+            endpoint_eps,
+        )
+
+    def closest_exit_projection_on_path(self, target_x, target_y, min_progress=0.0):
+        cumulative = self.path_cumulative_lengths()
+        candidates = []
+        endpoint_eps = 1e-3
+
+        for index in range(len(self.patrol_path) - 1):
+            projection = self.project_point_to_path_segment(
+                target_x,
+                target_y,
+                index,
+                cumulative,
+            )
+            if projection is None:
+                continue
+            if projection["progress"] + 1e-6 < min_progress:
+                continue
+
+            candidates.append(
+                self.mark_exit_projection(
+                    projection,
+                    "continuous_path",
+                    endpoint_eps,
+                )
+            )
+
+        if not candidates:
+            projection = self.closest_point_on_path(
+                target_x,
+                target_y,
+                min_progress=min_progress,
+            )
+            projection = self.mark_exit_projection(
+                projection,
+                "path_fallback",
+                endpoint_eps,
+            )
+            projection = self.handoff_exit_endpoint_to_next_segment(
+                projection,
+                target_x,
+                target_y,
+                cumulative,
+                min_progress,
+                endpoint_eps,
+            )
+            return self.enforce_exit_min_goal_spacing(
+                projection,
+                target_x,
+                target_y,
+                cumulative,
+                min_progress,
+                endpoint_eps,
+            )
+
+        best = min(candidates, key=lambda item: (item["distance"], item["progress"]))
+        if (
+            best["is_endpoint_projection"]
+            and self.cart_exit_endpoint_handoff_tolerance > 0.0
+        ):
+            handoff_limit = best["distance"] + self.cart_exit_endpoint_handoff_tolerance
+            if best["t"] >= 1.0 - endpoint_eps:
+                def progress_filter(item):
+                    return item["progress"] >= best["progress"] - 1e-6
+            else:
+                def progress_filter(item):
+                    return item["progress"] <= best["progress"] + 1e-6
+
+            interior_candidates = [
+                item
+                for item in candidates
+                if not item["is_endpoint_projection"]
+                and item["distance"] <= handoff_limit
+                and progress_filter(item)
+            ]
+            if interior_candidates:
+                best = min(
+                    interior_candidates,
+                    key=lambda item: (item["distance"], item["progress"]),
+                )
+                best["projection_source"] = "continuous_path_endpoint_handoff"
+
+        best = self.handoff_exit_endpoint_to_next_segment(
+            best,
+            target_x,
+            target_y,
+            cumulative,
+            min_progress,
+            endpoint_eps,
+        )
+        return self.enforce_exit_min_goal_spacing(
+            best,
+            target_x,
+            target_y,
+            cumulative,
+            min_progress,
+            endpoint_eps,
+        )
 
     def build_route_to_exit(self, exit_projection, current_progress):
         exit_progress = exit_projection["progress"]
@@ -4592,6 +4998,7 @@ class AutoNavCommander(Node):
         self.pending_precise_pose_msg = None
         self.pending_precise_pose_type = None
         self.last_dock_prep_rear_goal = None
+        self.last_dock_prep_front_goal = None
         self.cancel_timer("precise_pose_timeout")
 
     def cart_stop_distance(self):
