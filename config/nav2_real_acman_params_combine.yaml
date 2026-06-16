@@ -266,7 +266,7 @@ controller_server:
       AckermannConstraints:
         min_turning_r: 0.75
 
-      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
+      critics: ["ConstraintCritic", "ObstaclesCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
 
       # 🚨 [최적화] 인플레이션이 걸려있던 크리틱 가중치를 모두 정규화
       ConstraintCritic:
@@ -295,12 +295,21 @@ controller_server:
       ObstaclesCritic:
         enabled: true
         cost_power: 1
-        repulsion_weight: 10.0          
-        critical_weight: 40.0
+        repulsion_weight: 12.0
+        critical_weight: 55.0
         consider_footprint: true       
         collision_cost: 10000.0        
-        collision_margin_distance: 0.35 
-        near_goal_distance: 0.7
+        collision_margin_distance: 0.42
+        near_goal_distance: 0.8
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.5
+        critical_cost: 180.0
+        inflation_layer_name: "inflation_layer"
+        consider_footprint: true
+        collision_cost: 10000.0
+        near_goal_distance: 0.8
       PathAlignCritic:
         enabled: true
         cost_power: 1
@@ -511,7 +520,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.0
-        inflation_radius: 1.0
+        inflation_radius: 1.20
 
 global_costmap:
   global_costmap:
@@ -555,7 +564,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.0
-        inflation_radius: 1.0
+        inflation_radius: 1.30
 
 bt_navigator:
   ros__parameters:

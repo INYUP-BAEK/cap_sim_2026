@@ -68,7 +68,7 @@ class AutoNavCommander(Node):
                 ("allow_manual_goal_interrupt", False),
                 ("scenario1_cart_station_x", -0.9610295295715332),
                 ("scenario1_cart_station_y", 1.0462348461151123),
-                ("scenario1_cart_count_after_docking", 3),
+                ("scenario1_cart_count_after_docking", 2),
                 ("scenario1_pickup_max_retries", 3),
                 ("scenario2_cart_count_after_docking", 1),
                 ("robot_rejoin_half_spacing", 0.5),
@@ -91,6 +91,8 @@ class AutoNavCommander(Node):
                 ("cart_mode_use_midpoint_tracking", True),
                 ("cart_mode_tracking_offset_m", 0.0),
                 ("cart_mode_tracking_offset_ratio", 0.5),
+                ("cart_mode_turn_tracking_offset_ratio", 0.25),
+                ("cart_mode_turn_angle_threshold_rad", 0.45),
                 ("route_tf_check_period_sec", 0.5),
                 ("cart_exit_direct_route", False),
                 ("cart_exit_endpoint_handoff_tolerance", 1.0),
@@ -102,13 +104,15 @@ class AutoNavCommander(Node):
                 ("final_rear_clear_distance", 0.4),
                 ("final_rejoin_rear_goal_x", -0.2095),
                 ("final_rejoin_rear_goal_y", -0.1394),
-                ("final_rejoin_rear_goal_yaw", 3.1409),
-                ("final_rejoin_front_goal_x", -1.2404),
-                ("final_rejoin_front_goal_y", -0.2542),
-                ("final_rejoin_front_goal_yaw", -3.1257),
+                ("final_rejoin_rear_goal_orientation_z", 0.011696401865232216),
+                ("final_rejoin_rear_goal_orientation_w", 0.9999315947520645),
+                ("final_rejoin_front_goal_x", -1.1921802759170532),
+                ("final_rejoin_front_goal_y", -19.888965606689453),
+                ("final_rejoin_front_goal_orientation_z", -0.01121208666598808),
+                ("final_rejoin_front_goal_orientation_w", 0.9999371425807696),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
-                ("scenario2_front_wait_clear_distance", 0.8),
+                ("scenario2_front_wait_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_timeout_sec", 0.0),
                 ("scenario2_rear_cart_rejoin_back_distance", 1.0),
                 ("rear_cart_rejoin_tf_xy_tolerance", 0.45),
@@ -286,6 +290,19 @@ class AutoNavCommander(Node):
                 float(self.get_parameter("cart_mode_tracking_offset_ratio").value),
             ),
         )
+        self.cart_mode_turn_tracking_offset_ratio = min(
+            self.cart_mode_tracking_offset_ratio,
+            max(
+                0.0,
+                float(
+                    self.get_parameter("cart_mode_turn_tracking_offset_ratio").value
+                ),
+            ),
+        )
+        self.cart_mode_turn_angle_threshold_rad = max(
+            0.0,
+            self.param_float("cart_mode_turn_angle_threshold_rad", 0.45),
+        )
         self.route_tf_check_period_sec = max(
             0.0,
             self.param_float("route_tf_check_period_sec", 0.5),
@@ -322,8 +339,11 @@ class AutoNavCommander(Node):
         self.final_rejoin_rear_goal_y = float(
             self.get_parameter("final_rejoin_rear_goal_y").value
         )
-        self.final_rejoin_rear_goal_yaw = float(
-            self.get_parameter("final_rejoin_rear_goal_yaw").value
+        self.final_rejoin_rear_goal_orientation_z = float(
+            self.get_parameter("final_rejoin_rear_goal_orientation_z").value
+        )
+        self.final_rejoin_rear_goal_orientation_w = float(
+            self.get_parameter("final_rejoin_rear_goal_orientation_w").value
         )
         self.final_rejoin_front_goal_x = float(
             self.get_parameter("final_rejoin_front_goal_x").value
@@ -331,8 +351,11 @@ class AutoNavCommander(Node):
         self.final_rejoin_front_goal_y = float(
             self.get_parameter("final_rejoin_front_goal_y").value
         )
-        self.final_rejoin_front_goal_yaw = float(
-            self.get_parameter("final_rejoin_front_goal_yaw").value
+        self.final_rejoin_front_goal_orientation_z = float(
+            self.get_parameter("final_rejoin_front_goal_orientation_z").value
+        )
+        self.final_rejoin_front_goal_orientation_w = float(
+            self.get_parameter("final_rejoin_front_goal_orientation_w").value
         )
         self.front_clear_after_detach_delay_sec = self.param_float(
             "front_clear_after_detach_delay_sec",
@@ -627,14 +650,18 @@ class AutoNavCommander(Node):
         # ]
 
         self.patrol_path = [
-            (3.265, 0.0460, 0.9999, 0.00218),
-            (-0.7305, 0.8268, 0.9999, 0.0092),
+            (4.543252944946289, -0.24770820140838623, -0.9999745678879632, 0.007131870531729373),
+            (-5.292379379272461, -0.34566593170166016, -0.9999535786807311, 0.009635376671344854),
+            (-8.811412811279297, -3.298175096511841, -0.7126716077060745, 0.7014978115216319),
+            (-9.04727554321289, -17.279687881469727, -0.7029532559013295, 0.7112360508422784),
+            (-0.4592931270599365, -21.70427703857422, -0.013582751661167484, 0.9999077501736403),
         ]
 
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
         self.active_route_patrol_start_index = 0
+        self.active_route_tracking_offset = 0.0
         self.route_goal_retry_count = 0
         self.current_patrol_waypoint_index = 0
         self.pending_patrol_resume_after_docking = False
@@ -2576,7 +2603,90 @@ class AutoNavCommander(Node):
             State.WAIT_FRONT_ATTACH,
         )
         if self.active_scenario_id == 2 and self.state in scenario2_rejoin_states:
+            if self.scenario2_cart_is_committed():
+                return self.recover_scenario2_cart_committed_failure(reason)
             return self.start_scenario2_direct_rejoin(reason)
+
+        return False
+
+    def scenario2_cart_is_committed(self):
+        return (
+            self.rear_cart_attached
+            or self.state
+            in (
+                State.REAR_CART_GRIP_SETTLE,
+                State.REAR_CART_REJOIN,
+                State.WAIT_FRONT_ATTACH,
+            )
+        )
+
+    def recover_scenario2_cart_committed_failure(self, reason: str):
+        self.get_logger().warn(
+            "scenario 2 failure after cart pickup; keeping cart attached and retrying "
+            "instead of direct robot rejoin: %s" % reason
+        )
+
+        self.publish_footprints()
+        self.clear_rear_costmaps("scenario2 cart-committed recovery")
+
+        if self.state == State.WAIT_REAR_CART_ATTACH:
+            return self.accept_rear_cart_attach_done("keep_cart_recovery")
+
+        if self.state == State.REAR_CART_GRIP_SETTLE:
+            self.schedule_once(
+                "rear_cart_grip_settle_recovery",
+                max(self.rear_costmap_clear_settle_sec, self.tf_retry_delay_sec),
+                self.start_rear_cart_rejoin,
+            )
+            return True
+
+        if self.state == State.REAR_CART_REJOIN:
+            goal = self.last_rear_cart_rejoin_goal
+            if goal is None:
+                self.get_logger().error(
+                    "cannot retry rear cart rejoin recovery: no saved goal."
+                )
+                return False
+            self.cancel_rear_goal()
+            self.cancel_timer("rear_cart_rejoin_goal_retry")
+            self.cancel_timer("rear_cart_rejoin_tf_check")
+            self.cancel_timer("rear_cart_rejoin_costmap_settle")
+            self.rear_cart_rejoin_goal_retry_count = 0
+            delay = max(
+                self.rear_costmap_clear_settle_sec,
+                self.rear_cart_rejoin_goal_retry_delay_sec,
+            )
+            self.schedule_once(
+                "rear_cart_rejoin_keep_cart_retry",
+                delay,
+                lambda g=goal: self.send_rear_cart_rejoin_goal(g)
+                if self.state == State.REAR_CART_REJOIN
+                else None,
+            )
+            return True
+
+        if self.state == State.WAIT_FRONT_ATTACH:
+            self.cancel_front_goal()
+            self.cancel_timer("scenario2_front_attach_retry")
+            self.cancel_timer("scenario2_front_attach_start")
+            self.cancel_timer("scenario2_front_attach_reset")
+            self.cancel_timer("scenario2_front_attach_front_home")
+            self.cancel_timer("attach_timeout")
+            self.scenario2_front_attach_retry_count = 0
+            delay = max(
+                self.rear_costmap_clear_settle_sec,
+                self.scenario2_front_attach_retry_delay_sec,
+            )
+            self.schedule_once(
+                "scenario2_front_attach_keep_cart_retry",
+                delay,
+                lambda: self.start_scenario2_front_attach_attempt(
+                    "keep_cart_recovery"
+                )
+                if self.state == State.WAIT_FRONT_ATTACH
+                else None,
+            )
+            return True
 
         return False
 
@@ -2938,26 +3048,29 @@ class AutoNavCommander(Node):
         values = (
             self.final_rejoin_rear_goal_x,
             self.final_rejoin_rear_goal_y,
-            self.final_rejoin_rear_goal_yaw,
+            self.final_rejoin_rear_goal_orientation_z,
+            self.final_rejoin_rear_goal_orientation_w,
             self.final_rejoin_front_goal_x,
             self.final_rejoin_front_goal_y,
-            self.final_rejoin_front_goal_yaw,
+            self.final_rejoin_front_goal_orientation_z,
+            self.final_rejoin_front_goal_orientation_w,
         )
         if not all(math.isfinite(value) for value in values):
             return None, None
 
-        return (
-            self.create_pose_stamped(
-                self.final_rejoin_rear_goal_x,
-                self.final_rejoin_rear_goal_y,
-                self.final_rejoin_rear_goal_yaw,
-            ),
-            self.create_pose_stamped(
-                self.final_rejoin_front_goal_x,
-                self.final_rejoin_front_goal_y,
-                self.final_rejoin_front_goal_yaw,
-            ),
+        rear_goal = self.create_pose_stamped_zw(
+            self.final_rejoin_rear_goal_x,
+            self.final_rejoin_rear_goal_y,
+            self.final_rejoin_rear_goal_orientation_z,
+            self.final_rejoin_rear_goal_orientation_w,
         )
+        front_goal = self.create_pose_stamped_zw(
+            self.final_rejoin_front_goal_x,
+            self.final_rejoin_front_goal_y,
+            self.final_rejoin_front_goal_orientation_z,
+            self.final_rejoin_front_goal_orientation_w,
+        )
+        return rear_goal, front_goal
 
     def start_final_rejoin_pose_goals(self):
         rear_goal, front_goal = self.final_rejoin_goal_poses()
@@ -2976,15 +3089,18 @@ class AutoNavCommander(Node):
         self.enable_navigation_control()
         self.publish_docking_target_burst(0, "final_robot_rejoin_target_reset")
         self.get_logger().info(
-            "sending final robot rejoin pose goals: rear=(%.2f, %.2f, %.2f), "
-            "front=(%.2f, %.2f, %.2f)"
+            "sending final robot rejoin pose goals: "
+            "rear=(%.2f, %.2f, qz=%.6f, qw=%.6f), "
+            "front=(%.2f, %.2f, qz=%.6f, qw=%.6f)"
             % (
                 self.final_rejoin_rear_goal_x,
                 self.final_rejoin_rear_goal_y,
-                self.final_rejoin_rear_goal_yaw,
+                self.final_rejoin_rear_goal_orientation_z,
+                self.final_rejoin_rear_goal_orientation_w,
                 self.final_rejoin_front_goal_x,
                 self.final_rejoin_front_goal_y,
-                self.final_rejoin_front_goal_yaw,
+                self.final_rejoin_front_goal_orientation_z,
+                self.final_rejoin_front_goal_orientation_w,
             )
         )
 
@@ -3092,18 +3208,21 @@ class AutoNavCommander(Node):
         pose = self.active_route_poses[self.active_route_index]
         pose.header.stamp = self.get_clock().now().to_msg()
         nav_pose, tracking_offset = self.route_nav_goal_pose(pose)
+        self.active_route_tracking_offset = tracking_offset
         self.update_dynamic_state("route_goal")
 
         label = f"ROUTE_{self.active_route_type}"
         if tracking_offset > 0.0:
+            turn_angle = self.route_turn_angle_at_index(self.active_route_index)
             self.get_logger().info(
                 "route %s midpoint goal %d/%d: tracking_offset=%.2fm, "
-                "midpoint=(%.2f, %.2f), nav_goal=(%.2f, %.2f)"
+                "turn_angle=%.2frad, midpoint=(%.2f, %.2f), nav_goal=(%.2f, %.2f)"
                 % (
                     self.active_route_type,
                     self.active_route_index + 1,
                     len(self.active_route_poses),
                     tracking_offset,
+                    turn_angle,
                     pose.pose.position.x,
                     pose.pose.position.y,
                     nav_pose.pose.position.x,
@@ -4116,6 +4235,9 @@ class AutoNavCommander(Node):
             self.resume_rear_nav2("route_goal_rejected")
 
         if self.route_goal_retry_count > max_retries:
+            if self.cart_mode_patrol_active():
+                self.recover_cart_mode_route_failure(reason)
+                return
             if self.active_route_type == "PATROL":
                 self.skip_current_patrol_waypoint(reason)
                 return
@@ -4130,6 +4252,50 @@ class AutoNavCommander(Node):
             "route_goal_retry",
             retry_delay,
             self.send_current_route_goal,
+        )
+
+    def cart_mode_patrol_active(self):
+        return (
+            self.active_route_type == "PATROL"
+            and self.is_attached
+            and self.cart_count >= 1
+            and self.active_route_index < len(self.active_route_poses)
+        )
+
+    def recover_cart_mode_route_failure(self, reason: str):
+        route_index = self.active_route_index
+        route_count = len(self.active_route_poses)
+        self.cancel_timer("route_goal_retry")
+        self.cancel_timer("route_tf_check")
+        self.cancel_timer("route_goal_costmap_settle")
+        self.cancel_rear_goal()
+        self.publish_footprints()
+
+        cleared = self.clear_rear_costmaps(
+            "cart mode route recovery goal %d/%d"
+            % (route_index + 1, route_count)
+        )
+        if cleared:
+            self.last_rear_costmap_clear_time = self.get_clock().now()
+
+        self.route_goal_retry_count = 0
+        delay = max(
+            self.route_goal_retry_delay_sec,
+            self.rear_costmap_clear_settle_sec if cleared else 0.0,
+        )
+        self.get_logger().warn(
+            "cart mode route goal %d/%d hit retry limit but cart is attached; "
+            "keeping cart and retrying same waypoint after costmap recovery: %s"
+            % (route_index + 1, route_count, reason)
+        )
+        self.schedule_once(
+            "cart_mode_route_keep_cart_retry",
+            delay,
+            lambda prepared=cleared: self.send_current_route_goal(
+                costmaps_prepared=prepared
+            )
+            if self.cart_mode_patrol_active()
+            else None,
         )
 
     def skip_current_patrol_waypoint(self, reason: str):
@@ -4604,10 +4770,12 @@ class AutoNavCommander(Node):
         self.cancel_timer("route_goal_retry")
         self.cancel_timer("route_tf_check")
         self.cancel_timer("route_goal_costmap_settle")
+        self.cancel_timer("cart_mode_route_keep_cart_retry")
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
         self.active_route_patrol_start_index = 0
+        self.active_route_tracking_offset = 0.0
         self.route_goal_retry_count = 0
 
     def clean_points(self, points):
@@ -4773,8 +4941,65 @@ class AutoNavCommander(Node):
             * self.cart_mode_tracking_offset_ratio
         )
 
+    def cart_mode_turn_tracking_offset(self):
+        if not self.cart_mode_midpoint_tracking_active():
+            return 0.0
+        return (
+            self.wheelbase_from_cart_count(self.cart_count)
+            * self.cart_mode_turn_tracking_offset_ratio
+        )
+
+    def route_turn_angle_at_index(self, route_index: int):
+        if route_index < 0 or route_index >= len(self.active_route_poses):
+            return 0.0
+
+        goal_pose = self.active_route_poses[route_index].pose
+        if route_index > 0:
+            prev_pose = self.active_route_poses[route_index - 1].pose
+            prev_x = prev_pose.position.x
+            prev_y = prev_pose.position.y
+        else:
+            robot_pose = self.robot_pose_in_map(
+                ("base_footprint", "base_link", "rear_base_link")
+            )
+            if robot_pose is None:
+                return 0.0
+            prev_x, prev_y, _ = robot_pose
+
+        incoming_dx = goal_pose.position.x - prev_x
+        incoming_dy = goal_pose.position.y - prev_y
+        if math.hypot(incoming_dx, incoming_dy) <= 1e-6:
+            return 0.0
+        incoming_yaw = math.atan2(incoming_dy, incoming_dx)
+
+        if route_index < len(self.active_route_poses) - 1:
+            next_pose = self.active_route_poses[route_index + 1].pose
+            outgoing_dx = next_pose.position.x - goal_pose.position.x
+            outgoing_dy = next_pose.position.y - goal_pose.position.y
+            if math.hypot(outgoing_dx, outgoing_dy) <= 1e-6:
+                return 0.0
+            outgoing_yaw = math.atan2(outgoing_dy, outgoing_dx)
+        else:
+            outgoing_yaw = self.yaw_from_quaternion(goal_pose.orientation)
+
+        return abs(self.normalize_angle(outgoing_yaw - incoming_yaw))
+
+    def cart_mode_tracking_offset_for_route_index(self, route_index: int):
+        base_offset = self.cart_mode_tracking_offset()
+        if base_offset <= 0.0:
+            return 0.0
+
+        turn_angle = self.route_turn_angle_at_index(route_index)
+        if turn_angle < self.cart_mode_turn_angle_threshold_rad:
+            return base_offset
+
+        turn_offset = self.cart_mode_turn_tracking_offset()
+        return max(0.0, min(base_offset, turn_offset))
+
     def route_nav_goal_pose(self, tracking_goal: PoseStamped):
-        offset = self.cart_mode_tracking_offset()
+        offset = self.cart_mode_tracking_offset_for_route_index(
+            self.active_route_index
+        )
         if offset <= 0.0:
             return tracking_goal, 0.0
 
@@ -4797,7 +5022,9 @@ class AutoNavCommander(Node):
         if robot_pose is None:
             return None
 
-        offset = self.cart_mode_tracking_offset()
+        offset = self.active_route_tracking_offset
+        if offset <= 0.0:
+            offset = self.cart_mode_tracking_offset()
         if offset <= 0.0:
             return robot_pose
 
@@ -5558,6 +5785,20 @@ class AutoNavCommander(Node):
         pose.pose.position.y = float(y)
         pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def create_pose_stamped_zw(self, x, y, orientation_z, orientation_w, frame_id="map"):
+        norm = math.hypot(float(orientation_z), float(orientation_w))
+        if norm <= 1e-9:
+            return None
+
+        pose = PoseStamped()
+        pose.header.frame_id = self.normalize_frame_id(frame_id) or "map"
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.orientation.z = float(orientation_z) / norm
+        pose.pose.orientation.w = float(orientation_w) / norm
         return pose
 
     def pose_xy_is_finite(self, pose_stamped: PoseStamped):
