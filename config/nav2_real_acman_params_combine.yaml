@@ -1,7 +1,7 @@
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 20.0
+    controller_frequency: 15.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -17,7 +17,7 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 50                 
       model_dt: 0.08                 
-      batch_size: 2000               
+      batch_size: 1600
       
       vx_std: 0.15                    
       vy_std: 0.0                    
@@ -154,7 +154,7 @@ controller_server:
       # stable travel direction while the cart is being pulled out.
       time_steps: 90
       model_dt: 0.08
-      batch_size: 2400
+      batch_size: 1800
       vx_std: 0.08
       vy_std: 0.0
       wz_std: 0.25
@@ -241,7 +241,7 @@ controller_server:
       # the rear frame onto every local path point.
       time_steps: 80
       model_dt: 0.07
-      batch_size: 2400
+      batch_size: 1800
       vx_std: 0.10
       vy_std: 0.0
       wz_std: 0.34
@@ -370,6 +370,7 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
+      lookup_table_size: 10.0
       motion_model_for_search: "REEDS_SHEPP" 
       # [최적화] 컨트롤러(0.40)가 무조건 돌 수 있게 0.45m 마진 설정
       minimum_turning_radius: 0.45   
@@ -394,6 +395,7 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
+      lookup_table_size: 10.0
       motion_model_for_search: "REEDS_SHEPP"
       minimum_turning_radius: 0.35
       reverse_penalty: 1.0
@@ -407,6 +409,7 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 5.0
+      lookup_table_size: 10.0
       motion_model_for_search: "REEDS_SHEPP"
 
       minimum_turning_radius: 0.95
@@ -443,7 +446,7 @@ local_costmap:
         track_unknown_space: true
         max_obstacle_height: 2.5
         origin_z: 0.0
-        publish_voxel_map: true   
+        publish_voxel_map: false
         combination_method: 1
         observation_sources: "lidar camera_clear"
         lidar:
@@ -513,8 +516,8 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 3.0
-      publish_frequency: 1.0
+      update_frequency: 1.0
+      publish_frequency: 0.5
       transform_tolerance: 1.0 
       global_frame: map
       robot_base_frame: base_footprint
@@ -540,8 +543,8 @@ global_costmap:
           topic: /cloud_registered_body
           marking: true
           clearing: true
-          obstacle_range: 10.0
-          raytrace_range: 12.0
+          obstacle_range: 8.0
+          raytrace_range: 10.0
           min_obstacle_height: 0.10
           max_obstacle_height: 1.50
 

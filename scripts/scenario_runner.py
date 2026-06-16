@@ -80,6 +80,9 @@ class AutoNavCommander(Node):
                 ("route_goal_rejected_retry_delay_sec", 2.5),
                 ("rear_cart_prep_goal_max_retries", 20),
                 ("rear_cart_prep_goal_retry_delay_sec", 3.0),
+                ("rear_cart_rejoin_goal_max_retries", 6),
+                ("rear_cart_rejoin_goal_retry_delay_sec", 2.0),
+                ("rear_cart_rejoin_relaxed_global_footprint_front_x", 0.75),
                 ("recovery_release_settle_sec", 1.0),
                 ("state_max_retries", 8),
                 ("tf_retry_delay_sec", 0.5),
@@ -97,12 +100,12 @@ class AutoNavCommander(Node):
                 ("final_cart_release_settle_sec", 1.0),
                 ("final_front_clear_distance", 0.4),
                 ("final_rear_clear_distance", 0.4),
-                ("final_rejoin_rear_goal_x", 0.0),
-                ("final_rejoin_rear_goal_y", 0.0),
-                ("final_rejoin_rear_goal_yaw", 0.0),
-                ("final_rejoin_front_goal_x", 0.0),
-                ("final_rejoin_front_goal_y", 0.0),
-                ("final_rejoin_front_goal_yaw", 0.0),
+                ("final_rejoin_rear_goal_x", -0.2095),
+                ("final_rejoin_rear_goal_y", -0.1394),
+                ("final_rejoin_rear_goal_yaw", 3.1409),
+                ("final_rejoin_front_goal_x", -1.2404),
+                ("final_rejoin_front_goal_y", -0.2542),
+                ("final_rejoin_front_goal_yaw", -3.1257),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_distance", 0.8),
@@ -242,6 +245,18 @@ class AutoNavCommander(Node):
         self.rear_cart_prep_goal_retry_delay_sec = max(
             0.1,
             self.param_float("rear_cart_prep_goal_retry_delay_sec", 3.0),
+        )
+        self.rear_cart_rejoin_goal_max_retries = max(
+            0,
+            self.param_int("rear_cart_rejoin_goal_max_retries", 6),
+        )
+        self.rear_cart_rejoin_goal_retry_delay_sec = max(
+            0.1,
+            self.param_float("rear_cart_rejoin_goal_retry_delay_sec", 2.0),
+        )
+        self.rear_cart_rejoin_relaxed_global_footprint_front_x = max(
+            0.3,
+            self.param_float("rear_cart_rejoin_relaxed_global_footprint_front_x", 0.75),
         )
         self.recovery_release_settle_sec = max(
             0.0,
@@ -601,11 +616,21 @@ class AutoNavCommander(Node):
         #     (-1.477, -20.036, 0.008, 1.000),
         #     (7.567, -16.613, 0.719, 0.695),
         # ]
+        # self.patrol_path = [
+        #     (7.6914, -16.8021, 0.7132, 0.7009),
+        #     (7.2559, -3.6483, 0.7121, 0.7020),
+        #     (3.9286, -0.1350, -1.0000, 0.0078),
+        #     (-5.6010, -0.2094, -0.9999, 0.0121),
+        #     (-8.7201, -3.6834, -0.7056, 0.7086),
+        #     (-8.8396, -16.4991, -0.7056, 0.7086),
+        #     (-0.4402, -21.3740, 0.0170, 0.9999),
+        # ]
+
         self.patrol_path = [
-            (4.3804, -0.2327, -0.9999, 0.0095),
-            (-6.005, -0.3820, -0.9999, 0.0095),
-            (-8.682, -5.2208, -0.738, 0.6747),
+            (3.265, 0.0460, 0.9999, 0.00218),
+            (-0.7305, 0.8268, 0.9999, 0.0092),
         ]
+
         self.active_route_type = None
         self.active_route_poses = []
         self.active_route_index = 0
@@ -622,6 +647,7 @@ class AutoNavCommander(Node):
         self.scenario_recovery_active = False
         self.scenario1_pickup_retry_count = 0
         self.rear_cart_prep_goal_retry_count = 0
+        self.rear_cart_rejoin_goal_retry_count = 0
         self.rejoin_mode = None
         self.rejoin_rear_goal_done = False
         self.rejoin_front_goal_done = False
@@ -634,6 +660,7 @@ class AutoNavCommander(Node):
         self.last_dock_prep_rear_goal = None
         self.last_dock_prep_front_goal = None
         self.last_rear_cart_rejoin_goal = None
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.rear_dock_goal_done = False
         self.front_dock_goal_done = False
         self.last_cart_goal_time = None
@@ -644,6 +671,7 @@ class AutoNavCommander(Node):
         self.rear_align_goal_retry_count = 0
         self.dock_prep_rear_goal_retry_count = 0
         self.rear_cart_prep_goal_retry_count = 0
+        self.rear_cart_rejoin_goal_retry_count = 0
         self.precise_goal_retries = 0
         self.detach_release_retry_count = 0
         self.scenario2_front_attach_retry_count = 0
@@ -927,6 +955,13 @@ class AutoNavCommander(Node):
                 self.get_logger().info("rear cart rl_docking_done=true")
             return
 
+        if (
+            self.active_scenario_id == 2
+            and self.state in (State.REAR_CART_GRIP_SETTLE, State.REAR_CART_REJOIN)
+            and (self.rear_rl_docking_done or self.rear_cart_attached)
+        ):
+            return
+
         if self.state != State.WAIT_ATTACH:
             self.get_logger().warn(
                 f"rear rl docking done ignored because scenario state={self.state.value}"
@@ -1132,33 +1167,58 @@ class AutoNavCommander(Node):
         )
 
     def publish_footprints(self):
-        rear_msg, front_msg = self.current_footprints()
-        self.global_footprint_pub.publish(rear_msg)
-        self.local_footprint_pub.publish(rear_msg)
-        self.front_global_footprint_pub.publish(front_msg)
-        self.front_local_footprint_pub.publish(front_msg)
+        (
+            rear_global_msg,
+            rear_local_msg,
+            front_global_msg,
+            front_local_msg,
+        ) = self.current_footprints()
+        self.global_footprint_pub.publish(rear_global_msg)
+        self.local_footprint_pub.publish(rear_local_msg)
+        self.front_global_footprint_pub.publish(front_global_msg)
+        self.front_local_footprint_pub.publish(front_local_msg)
 
     def current_footprints(self):
         rear_width = 0.25
         rear_bumper_x = -0.3
 
         if self.rear_cart_attached:
-            rear_front_x = self.wheelbase_from_cart_count(1) + 0.3
+            rear_local_front_x = self.wheelbase_from_cart_count(1) + 0.3
+            rear_global_front_x = rear_local_front_x
+            if (
+                self.state == State.REAR_CART_REJOIN
+                and self.rear_cart_rejoin_relaxed_global_footprint
+            ):
+                rear_global_front_x = min(
+                    rear_local_front_x,
+                    self.rear_cart_rejoin_relaxed_global_footprint_front_x,
+                )
+            front_msg = self.create_polygon(0.3, -0.3, 0.25)
             return (
-                self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
-                self.create_polygon(0.3, -0.3, 0.25),
+                self.create_polygon(rear_global_front_x, rear_bumper_x, rear_width),
+                self.create_polygon(rear_local_front_x, rear_bumper_x, rear_width),
+                front_msg,
+                front_msg,
             )
 
         if self.is_attached:
             rear_front_x = self.wheelbase_from_cart_count(self.cart_count) + 0.3
+            rear_msg = self.create_polygon(rear_front_x, rear_bumper_x, rear_width)
+            front_msg = self.create_polygon(0.01, -0.01, 0.01)
             return (
-                self.create_polygon(rear_front_x, rear_bumper_x, rear_width),
-                self.create_polygon(0.01, -0.01, 0.01),
+                rear_msg,
+                rear_msg,
+                front_msg,
+                front_msg,
             )
 
+        rear_msg = self.create_polygon(0.3, rear_bumper_x, rear_width)
+        front_msg = self.create_polygon(0.3, -0.3, 0.25)
         return (
-            self.create_polygon(0.3, rear_bumper_x, rear_width),
-            self.create_polygon(0.3, -0.3, 0.25),
+            rear_msg,
+            rear_msg,
+            front_msg,
+            front_msg,
         )
 
     def wheelbase_from_cart_count(self, cart_count: int):
@@ -2181,6 +2241,8 @@ class AutoNavCommander(Node):
         goal_y = y - back_distance * math.sin(yaw)
         goal = self.create_pose_stamped(goal_x, goal_y, yaw)
         self.last_rear_cart_rejoin_goal = goal
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = True
         self.set_state(State.REAR_CART_REJOIN, "rear_cart_attached")
         self.enable_navigation_control()
         self.update_dynamic_state("rear_cart_rejoin_start")
@@ -2221,10 +2283,48 @@ class AutoNavCommander(Node):
             "REAR_CART_REJOIN",
             self.rear_cart_diff_bt_path,
         ):
-            self.abort_scenario("failed to send rear cart rejoin goal")
+            self.retry_rear_cart_rejoin_or_abort("failed to send rear cart rejoin goal")
             return False
         self.schedule_rear_cart_rejoin_tf_check()
         return True
+
+    def retry_rear_cart_rejoin_or_abort(self, reason: str):
+        if self.state != State.REAR_CART_REJOIN:
+            return
+        if self.accept_rear_cart_rejoin_by_tf(reason, cancel_active=False):
+            return
+
+        count = self.rear_cart_rejoin_goal_retry_count + 1
+        self.rear_cart_rejoin_goal_retry_count = count
+        max_retries = self.rear_cart_rejoin_goal_max_retries
+        if count > max_retries:
+            self.abort_scenario(
+                "rear_cart_rejoin_goal_retry exceeded retry limit: %s" % reason
+            )
+            return
+
+        goal = self.last_rear_cart_rejoin_goal
+        if goal is None:
+            self.abort_scenario("rear cart rejoin retry unavailable: no goal")
+            return
+
+        self.cancel_rear_goal()
+        self.cancel_timer("rear_cart_rejoin_tf_check")
+        self.cancel_timer("rear_cart_rejoin_costmap_settle")
+        self.publish_footprints()
+        delay = self.rear_cart_rejoin_goal_retry_delay_sec
+        self.get_logger().warn(
+            "rear goal failed during cart rejoin. retry rear cart rejoin goal "
+            "%d/%d after %.1fs: %s"
+            % (count, max_retries, delay, reason)
+        )
+        self.schedule_once(
+            "rear_cart_rejoin_goal_retry",
+            delay,
+            lambda g=goal: self.send_rear_cart_rejoin_goal(g)
+            if self.state == State.REAR_CART_REJOIN
+            else None,
+        )
 
     def schedule_rear_cart_rejoin_tf_check(self):
         if self.rear_cart_rejoin_tf_check_period_sec <= 0.0:
@@ -2255,6 +2355,7 @@ class AutoNavCommander(Node):
             self.cancel_rear_goal()
         self.cancel_timer("rear_cart_rejoin_tf_check")
         self.cancel_timer("rear_cart_rejoin_costmap_settle")
+        self.cancel_timer("rear_cart_rejoin_goal_retry")
         self.get_logger().info(
             "rear cart rejoin accepted by TF fallback (%s)." % reason
         )
@@ -2319,11 +2420,15 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.cancel_timer("rear_cart_rejoin_tf_check")
         self.cancel_timer("rear_cart_rejoin_costmap_settle")
+        self.cancel_timer("rear_cart_rejoin_goal_retry")
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.clear_precise_pose()
         self.scenario2_front_attach_retry_count = 0
         self.set_state(State.WAIT_FRONT_ATTACH, "rear_cart_rejoined")
         self.enable_navigation_control()
         self.docking_state_confirmed = bool(self.is_attached)
+        self.publish_footprints()
         self.get_logger().info("scenario 2 rear cart returned.")
         self.start_scenario2_front_attach_attempt("rear_cart_rejoined")
 
@@ -2493,6 +2598,10 @@ class AutoNavCommander(Node):
     def start_scenario2_direct_rejoin(self, reason: str):
         self.scenario_recovery_active = True
         self.rejoin_mode = "scenario2_direct_rejoin"
+        self.cancel_timer("rear_cart_rejoin_goal_retry")
+        self.cancel_timer("rear_cart_rejoin_costmap_settle")
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.set_rear_cart_attached(False, "scenario2_direct_rejoin")
         self.set_cart_count(0, "scenario2_direct_rejoin", publish=True)
         self.get_logger().warn(
@@ -2512,6 +2621,8 @@ class AutoNavCommander(Node):
         self.clear_route()
         self.clear_precise_pose()
         self.last_rear_cart_rejoin_goal = None
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
@@ -3757,6 +3868,8 @@ class AutoNavCommander(Node):
         self.clear_route()
         self.clear_precise_pose()
         self.last_rear_cart_rejoin_goal = None
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
@@ -3866,7 +3979,7 @@ class AutoNavCommander(Node):
                 return
             if self.accept_rear_cart_rejoin_by_tf(reason, cancel_active=False):
                 return
-            self.abort_scenario(reason)
+            self.retry_rear_cart_rejoin_or_abort(reason)
         elif label == "FINAL_REAR_CLEAR":
             if self.state != State.FINAL_ROBOT_CLEAR:
                 self.get_logger().info(
@@ -4127,6 +4240,8 @@ class AutoNavCommander(Node):
         self.clear_route()
         self.clear_precise_pose()
         self.last_rear_cart_rejoin_goal = None
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
@@ -4155,6 +4270,9 @@ class AutoNavCommander(Node):
         self.cancel_front_goal()
         self.clear_route()
         self.clear_precise_pose()
+        self.last_rear_cart_rejoin_goal = None
+        self.rear_cart_rejoin_goal_retry_count = 0
+        self.rear_cart_rejoin_relaxed_global_footprint = False
         self.publish_dock_prep_done(False)
         self.publish_rl_docking_ready(False)
         self.clear_rl_docking_sequence_state()
