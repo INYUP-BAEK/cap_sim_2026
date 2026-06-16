@@ -46,6 +46,8 @@ class State(str, Enum):
     WAIT_REAR_CART_ATTACH = "WAIT_REAR_CART_ATTACH"
     REAR_CART_GRIP_SETTLE = "REAR_CART_GRIP_SETTLE"
     REAR_CART_REJOIN = "REAR_CART_REJOIN"
+    FINAL_CART_RELEASE = "FINAL_CART_RELEASE"
+    FINAL_ROBOT_CLEAR = "FINAL_ROBOT_CLEAR"
     ROBOT_REJOIN = "ROBOT_REJOIN"
     WAIT_ATTACH = "WAIT_ATTACH"
     WAIT_FRONT_ATTACH = "WAIT_FRONT_ATTACH"
@@ -90,6 +92,17 @@ class AutoNavCommander(Node):
                 ("cart_exit_direct_route", False),
                 ("cart_exit_endpoint_handoff_tolerance", 1.0),
                 ("cart_exit_min_goal_spacing", 0.6),
+                # final goal pose set
+                ("final_cart_dropoff_enabled", True),
+                ("final_cart_release_settle_sec", 1.0),
+                ("final_front_clear_distance", 0.4),
+                ("final_rear_clear_distance", 0.4),
+                ("final_rejoin_rear_goal_x", 0.0),
+                ("final_rejoin_rear_goal_y", 0.0),
+                ("final_rejoin_rear_goal_yaw", 0.0),
+                ("final_rejoin_front_goal_x", 0.0),
+                ("final_rejoin_front_goal_y", 0.0),
+                ("final_rejoin_front_goal_yaw", 0.0),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_distance", 0.8),
@@ -272,6 +285,39 @@ class AutoNavCommander(Node):
         self.cart_exit_min_goal_spacing = max(
             0.0,
             self.param_float("cart_exit_min_goal_spacing", 0.6),
+        )
+        self.final_cart_dropoff_enabled = bool(
+            self.get_parameter("final_cart_dropoff_enabled").value
+        )
+        self.final_cart_release_settle_sec = max(
+            0.0,
+            self.param_float("final_cart_release_settle_sec", 1.0),
+        )
+        self.final_front_clear_distance = max(
+            0.0,
+            self.param_float("final_front_clear_distance", 0.4),
+        )
+        self.final_rear_clear_distance = max(
+            0.0,
+            self.param_float("final_rear_clear_distance", 0.4),
+        )
+        self.final_rejoin_rear_goal_x = float(
+            self.get_parameter("final_rejoin_rear_goal_x").value
+        )
+        self.final_rejoin_rear_goal_y = float(
+            self.get_parameter("final_rejoin_rear_goal_y").value
+        )
+        self.final_rejoin_rear_goal_yaw = float(
+            self.get_parameter("final_rejoin_rear_goal_yaw").value
+        )
+        self.final_rejoin_front_goal_x = float(
+            self.get_parameter("final_rejoin_front_goal_x").value
+        )
+        self.final_rejoin_front_goal_y = float(
+            self.get_parameter("final_rejoin_front_goal_y").value
+        )
+        self.final_rejoin_front_goal_yaw = float(
+            self.get_parameter("final_rejoin_front_goal_yaw").value
         )
         self.front_clear_after_detach_delay_sec = self.param_float(
             "front_clear_after_detach_delay_sec",
@@ -579,6 +625,8 @@ class AutoNavCommander(Node):
         self.rejoin_mode = None
         self.rejoin_rear_goal_done = False
         self.rejoin_front_goal_done = False
+        self.final_front_clear_done = False
+        self.final_rear_clear_done = False
 
         self.detected_cart_pose = None
         self.pending_precise_pose_msg = None
@@ -795,6 +843,10 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     def docking_callback(self, msg: Bool):
         next_attached = bool(msg.data)
+        if next_attached and self.state == State.WAIT_REAR_CART_ATTACH:
+            if self.accept_rear_cart_attach_done("docking_state"):
+                return
+
         ignore_reason = self.docking_state_ignore_reason(next_attached)
         if ignore_reason:
             if self.is_attached:
@@ -829,8 +881,10 @@ class AutoNavCommander(Node):
             State.REAR_ALIGN,
             State.WAIT_PRECISE_POSE,
             State.REAR_CART_PREP,
+            State.FINAL_ROBOT_CLEAR,
+            State.ROBOT_REJOIN,
         ):
-            return "waiting for planned cart-approach sequence before attach."
+            return "waiting for planned detached navigation stage before attach."
         if self.active_scenario_id == 2 and self.state in (
             State.REAR_CART_PREP,
             State.WAIT_REAR_CART_ATTACH,
@@ -852,27 +906,7 @@ class AutoNavCommander(Node):
             return
 
         if self.state == State.WAIT_REAR_CART_ATTACH:
-            if not self.rear_rl_docking_started:
-                self.get_logger().warn(
-                    "rear cart docking done ignored because rear RL has not started."
-                )
-                return
-            if self.rear_rl_docking_done:
-                return
-            self.rear_rl_docking_done = True
-            self.get_logger().info("rear cart rl_docking_done=true")
-            self.set_rear_cart_attached(True, "rear_cart_attached")
-            self.cancel_timer("attach_timeout")
-            delay = self.rear_cart_grip_settle_delay_sec
-            self.set_state(State.REAR_CART_GRIP_SETTLE, "rear_cart_rl_done")
-            self.get_logger().info(
-                "rear cart grip settle wait before rejoin: %.2fs" % delay
-            )
-            self.schedule_once(
-                "rear_cart_grip_settle",
-                delay,
-                self.start_rear_cart_rejoin,
-            )
+            self.accept_rear_cart_attach_done("rear_rl_docking_done")
             return
 
         if self.state == State.WAIT_ROBOT_ATTACH:
@@ -1006,6 +1040,39 @@ class AutoNavCommander(Node):
             self.update_dynamic_state(reason)
         else:
             self.publish_footprints()
+
+    def accept_rear_cart_attach_done(self, source: str):
+        if self.state != State.WAIT_REAR_CART_ATTACH:
+            return False
+        if not self.rear_rl_docking_started:
+            self.get_logger().warn(
+                "rear cart attach success ignored because rear RL has not started "
+                f"({source})."
+            )
+            return False
+
+        if self.rear_rl_docking_done and self.rear_cart_attached:
+            return True
+
+        self.rear_rl_docking_done = True
+        self.docking_state_confirmed = True
+        self.get_logger().info(
+            "rear cart attach accepted by %s. Starting grip settle before rejoin."
+            % source
+        )
+        self.set_rear_cart_attached(True, f"rear_cart_attached:{source}")
+        self.cancel_timer("attach_timeout")
+        delay = self.rear_cart_grip_settle_delay_sec
+        self.set_state(State.REAR_CART_GRIP_SETTLE, f"rear_cart_attached:{source}")
+        self.get_logger().info(
+            "rear cart grip settle wait before rejoin: %.2fs" % delay
+        )
+        self.schedule_once(
+            "rear_cart_grip_settle",
+            delay,
+            self.start_rear_cart_rejoin,
+        )
+        return True
 
     def scenario_cart_count_after_docking(self):
         if self.active_scenario_id == 1:
@@ -1251,6 +1318,8 @@ class AutoNavCommander(Node):
         self.rejoin_mode = None
         self.rejoin_rear_goal_done = False
         self.rejoin_front_goal_done = False
+        self.final_front_clear_done = False
+        self.final_rear_clear_done = False
         self.set_cart_count(0, f"{source}_start", publish=True)
 
         self.enable_navigation_control()
@@ -1508,6 +1577,11 @@ class AutoNavCommander(Node):
             self.cancel_timer("detach_release_retry_wait")
             self.detach_release_retry_count = 0
             self.schedule_front_clear()
+            return
+
+        if self.state == State.FINAL_CART_RELEASE and not attached:
+            self.cancel_timer("final_cart_release_timeout")
+            self.start_final_robot_clear_after_release("docking_state=false")
             return
 
         if self.state in (
@@ -2554,7 +2628,261 @@ class AutoNavCommander(Node):
             self.enter_wait_robot_attach()
             return
 
+        if mode == "final_cart_dropoff":
+            self.enter_wait_robot_attach()
+            return
+
         self.abort_scenario(f"unknown rejoin mode: {mode}")
+
+    def should_start_final_cart_dropoff(self):
+        return (
+            self.final_cart_dropoff_enabled
+            and self.active_scenario_id in (1, 2)
+            and self.is_attached
+            and self.cart_count >= 1
+        )
+
+    def start_final_cart_dropoff(self, reason: str):
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.clear_route()
+        self.clear_precise_pose()
+        self.publish_dock_prep_done(False)
+        self.publish_rl_docking_ready(False)
+        self.clear_rl_docking_sequence_state()
+        self.final_front_clear_done = False
+        self.final_rear_clear_done = False
+        self.rejoin_mode = "final_cart_dropoff"
+        self.detach_release_retry_count = 0
+        self.set_state(State.FINAL_CART_RELEASE, reason)
+        self.enable_navigation_control()
+        self.publish_docking_target_burst(0, "final_dropoff_target_reset")
+        self.publish_bool_burst(
+            "final_dropoff_gripper_release",
+            self.gripper_toggle_pub,
+            False,
+        )
+        self.publish_bool_burst(
+            "final_dropoff_front_release",
+            self.front_home_pub,
+            True,
+        )
+
+        if not self.is_attached:
+            self.start_final_robot_clear_after_release("already detached")
+            return True
+
+        self.schedule_final_cart_release_timeout()
+        self.get_logger().info(
+            "final cart dropoff started. Waiting for /docking_state=false before "
+            "robot clear and rejoin."
+        )
+        return True
+
+    def schedule_final_cart_release_timeout(self):
+        if self.detach_timeout_sec <= 0.0:
+            return
+        self.schedule_once(
+            "final_cart_release_timeout",
+            self.detach_timeout_sec,
+            self.handle_final_cart_release_timeout,
+        )
+
+    def handle_final_cart_release_timeout(self):
+        if self.state != State.FINAL_CART_RELEASE:
+            return
+        if not self.is_attached:
+            self.start_final_robot_clear_after_release("final release timeout check")
+            return
+        if self.detach_release_retry_count >= self.detach_release_max_retries:
+            self.abort_scenario(
+                "final cart release timeout after retries: "
+                f"{self.detach_release_retry_count}/{self.detach_release_max_retries}"
+            )
+            return
+
+        self.detach_release_retry_count += 1
+        self.publish_docking_target_burst(0, "final_dropoff_release_retry_target_reset")
+        self.publish_bool_burst(
+            "final_dropoff_release_retry_gripper",
+            self.gripper_toggle_pub,
+            False,
+        )
+        self.publish_bool_burst(
+            "final_dropoff_release_retry_front",
+            self.front_home_pub,
+            True,
+        )
+        self.get_logger().warn(
+            "final cart release timeout. retry %d/%d after %.1fs"
+            % (
+                self.detach_release_retry_count,
+                self.detach_release_max_retries,
+                self.detach_release_retry_delay_sec,
+            )
+        )
+        self.schedule_once(
+            "final_cart_release_retry_wait",
+            self.detach_release_retry_delay_sec,
+            self.schedule_final_cart_release_timeout,
+        )
+
+    def start_final_robot_clear_after_release(self, reason: str):
+        if self.state != State.FINAL_CART_RELEASE:
+            return False
+
+        self.cancel_timer("final_cart_release_timeout")
+        self.cancel_timer("final_cart_release_retry_wait")
+        self.detach_release_retry_count = 0
+        self.set_cart_count(0, f"final_cart_release:{reason}", publish=True)
+        self.set_rear_cart_attached(False, f"final_cart_release:{reason}")
+        self.final_front_clear_done = self.final_front_clear_distance <= 0.0
+        self.final_rear_clear_done = self.final_rear_clear_distance <= 0.0
+        self.set_state(State.FINAL_ROBOT_CLEAR, reason)
+        self.enable_navigation_control()
+
+        delay = self.final_cart_release_settle_sec
+        if delay > 0.0:
+            self.get_logger().info(
+                "waiting %.2fs after final cart release before robot clear." % delay
+            )
+            self.schedule_once(
+                "final_cart_release_settle",
+                delay,
+                self.send_final_robot_clear_goals,
+            )
+            return True
+
+        self.send_final_robot_clear_goals()
+        return True
+
+    def send_final_robot_clear_goals(self):
+        if self.state != State.FINAL_ROBOT_CLEAR:
+            return False
+
+        if self.final_rear_clear_distance > 0.0:
+            rear_pose = self.robot_pose_in_map(
+                ("base_footprint", "base_link", "rear_base_link")
+            )
+            if rear_pose is None:
+                self.abort_scenario("rear pose unavailable for final clear")
+                return False
+            rear_x, rear_y, rear_yaw = rear_pose
+            distance = self.final_rear_clear_distance
+            rear_goal = self.create_pose_stamped(
+                rear_x - distance * math.cos(rear_yaw),
+                rear_y - distance * math.sin(rear_yaw),
+                rear_yaw,
+            )
+            if not self.send_rear_goal(
+                rear_goal,
+                "FINAL_REAR_CLEAR",
+                self.diff_bt_path,
+            ):
+                self.abort_scenario("failed to send final rear clear goal")
+                return False
+        else:
+            self.final_rear_clear_done = True
+
+        if self.final_front_clear_distance > 0.0:
+            if self.front_nav_transport == "topic_proxy":
+                if not self.send_front_clear_command(
+                    label="FINAL_FRONT_CLEAR",
+                    distance=self.final_front_clear_distance,
+                    timeout_sec=self.front_clear_timeout_sec,
+                ):
+                    self.abort_scenario("failed to send final front clear command")
+                    return False
+            else:
+                front_pose = self.robot_pose_in_map(
+                    ("front/base_footprint", "front/base_link")
+                )
+                if front_pose is None:
+                    self.abort_scenario("front pose unavailable for final clear")
+                    return False
+                front_x, front_y, front_yaw = front_pose
+                distance = self.final_front_clear_distance
+                front_goal = self.create_pose_stamped(
+                    front_x + distance * math.cos(front_yaw),
+                    front_y + distance * math.sin(front_yaw),
+                    front_yaw,
+                )
+                if not self.send_front_goal(front_goal, "FINAL_FRONT_CLEAR"):
+                    self.abort_scenario("failed to send final front clear goal")
+                    return False
+        else:
+            self.final_front_clear_done = True
+
+        self.check_final_robot_clear_done()
+        return True
+
+    def check_final_robot_clear_done(self):
+        if self.state != State.FINAL_ROBOT_CLEAR:
+            return
+        if not (self.final_rear_clear_done and self.final_front_clear_done):
+            return
+        self.start_final_rejoin_pose_goals()
+
+    def final_rejoin_goal_poses(self):
+        values = (
+            self.final_rejoin_rear_goal_x,
+            self.final_rejoin_rear_goal_y,
+            self.final_rejoin_rear_goal_yaw,
+            self.final_rejoin_front_goal_x,
+            self.final_rejoin_front_goal_y,
+            self.final_rejoin_front_goal_yaw,
+        )
+        if not all(math.isfinite(value) for value in values):
+            return None, None
+
+        return (
+            self.create_pose_stamped(
+                self.final_rejoin_rear_goal_x,
+                self.final_rejoin_rear_goal_y,
+                self.final_rejoin_rear_goal_yaw,
+            ),
+            self.create_pose_stamped(
+                self.final_rejoin_front_goal_x,
+                self.final_rejoin_front_goal_y,
+                self.final_rejoin_front_goal_yaw,
+            ),
+        )
+
+    def start_final_rejoin_pose_goals(self):
+        rear_goal, front_goal = self.final_rejoin_goal_poses()
+        if rear_goal is None or front_goal is None:
+            self.abort_scenario("invalid final robot rejoin goal parameters")
+            return False
+
+        self.cancel_rear_goal()
+        self.cancel_front_goal()
+        self.final_rear_clear_done = False
+        self.final_front_clear_done = False
+        self.rejoin_rear_goal_done = False
+        self.rejoin_front_goal_done = False
+        self.rejoin_mode = "final_cart_dropoff"
+        self.set_state(State.ROBOT_REJOIN, "final_robot_rejoin_goals")
+        self.enable_navigation_control()
+        self.publish_docking_target_burst(0, "final_robot_rejoin_target_reset")
+        self.get_logger().info(
+            "sending final robot rejoin pose goals: rear=(%.2f, %.2f, %.2f), "
+            "front=(%.2f, %.2f, %.2f)"
+            % (
+                self.final_rejoin_rear_goal_x,
+                self.final_rejoin_rear_goal_y,
+                self.final_rejoin_rear_goal_yaw,
+                self.final_rejoin_front_goal_x,
+                self.final_rejoin_front_goal_y,
+                self.final_rejoin_front_goal_yaw,
+            )
+        )
+
+        rear_sent = self.send_rear_goal(rear_goal, "REJOIN_REAR", self.diff_bt_path)
+        front_sent = self.send_front_goal(front_goal, "REJOIN_FRONT")
+        if not rear_sent or not front_sent:
+            self.abort_scenario("failed to send final robot rejoin pose goals")
+            return False
+        return True
 
     def enter_wait_robot_attach(self):
         self.clear_precise_pose()
@@ -2692,6 +3020,9 @@ class AutoNavCommander(Node):
         self.clear_route()
 
         if route_type == "PATROL":
+            if self.should_start_final_cart_dropoff():
+                self.start_final_cart_dropoff("patrol complete")
+                return
             self.complete_scenario("patrol complete")
         elif route_type == "EXIT":
             self.prepare_patrol_resume_after_docking(
@@ -2992,6 +3323,15 @@ class AutoNavCommander(Node):
                 return
             self.cancel_timer("rear_cart_rejoin_tf_check")
             self.enter_wait_front_attach()
+        elif label == "FINAL_REAR_CLEAR":
+            if self.state != State.FINAL_ROBOT_CLEAR:
+                self.get_logger().info(
+                    "final rear clear result ignored because state=%s"
+                    % self.state.value
+                )
+                return
+            self.final_rear_clear_done = True
+            self.check_final_robot_clear_done()
         elif label == "REJOIN_REAR":
             if self.state != State.ROBOT_REJOIN:
                 self.get_logger().info(
@@ -3051,6 +3391,15 @@ class AutoNavCommander(Node):
                 return
             self.front_dock_goal_done = True
             self.check_dock_prep_done()
+        elif label == "FINAL_FRONT_CLEAR":
+            if self.state != State.FINAL_ROBOT_CLEAR:
+                self.get_logger().info(
+                    "final front clear result ignored because state=%s"
+                    % self.state.value
+                )
+                return
+            self.final_front_clear_done = True
+            self.check_final_robot_clear_done()
         elif label == "REJOIN_FRONT":
             if self.state != State.ROBOT_REJOIN:
                 self.get_logger().info(
@@ -3518,6 +3867,14 @@ class AutoNavCommander(Node):
             if self.accept_rear_cart_rejoin_by_tf(reason, cancel_active=False):
                 return
             self.abort_scenario(reason)
+        elif label == "FINAL_REAR_CLEAR":
+            if self.state != State.FINAL_ROBOT_CLEAR:
+                self.get_logger().info(
+                    "final rear clear failure ignored because state=%s: %s"
+                    % (self.state.value, reason)
+                )
+                return
+            self.abort_scenario(reason)
         elif label == "REJOIN_REAR":
             if self.state != State.ROBOT_REJOIN:
                 self.get_logger().info(
@@ -3569,6 +3926,14 @@ class AutoNavCommander(Node):
                 cancel_active=False,
                 required_robot="front",
             ):
+                return
+            self.abort_scenario(reason)
+        elif label == "FINAL_FRONT_CLEAR":
+            if self.state != State.FINAL_ROBOT_CLEAR:
+                self.get_logger().info(
+                    "final front clear failure ignored because state=%s: %s"
+                    % (self.state.value, reason)
+                )
                 return
             self.abort_scenario(reason)
         elif label == "REJOIN_FRONT":
@@ -3728,6 +4093,10 @@ class AutoNavCommander(Node):
             if self.state == State.WAIT_ATTACH and self.docking_state_confirmed:
                 self.check_rl_docking_sequence_done("attach_timeout:docking_state")
                 return
+            if self.state == State.WAIT_REAR_CART_ATTACH:
+                if self.rear_rl_docking_done or self.rear_cart_attached:
+                    self.accept_rear_cart_attach_done("attach_timeout:rear_cart_state")
+                    return
             if self.state == State.WAIT_FRONT_ATTACH:
                 if self.docking_state_confirmed:
                     self.check_front_attach_done("attach_timeout:docking_state")
@@ -3770,6 +4139,8 @@ class AutoNavCommander(Node):
         self.detach_release_retry_count = 0
         self.scenario2_front_attach_retry_count = 0
         self.rejoin_mode = None
+        self.final_front_clear_done = False
+        self.final_rear_clear_done = False
         self.update_dynamic_state("scenario_complete")
         self.enable_joystick_control()
         self.set_state(State.IDLE, reason)
@@ -3796,6 +4167,8 @@ class AutoNavCommander(Node):
         self.detach_release_retry_count = 0
         self.scenario2_front_attach_retry_count = 0
         self.rejoin_mode = None
+        self.final_front_clear_done = False
+        self.final_rear_clear_done = False
         if return_joystick:
             self.enable_joystick_control()
         self.set_state(State.IDLE, "abort")
