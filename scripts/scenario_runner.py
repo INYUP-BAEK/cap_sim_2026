@@ -66,8 +66,8 @@ class AutoNavCommander(Node):
                 ("initial_attached", True),
                 ("enable_auto_scenario", True),
                 ("allow_manual_goal_interrupt", False),
-                ("scenario1_cart_station_x", -0.9610295295715332),
-                ("scenario1_cart_station_y", 1.0462348461151123),
+                ("scenario1_cart_station_x", -2.030048131942749),
+                ("scenario1_cart_station_y", 0.9378207921981812),
                 ("scenario1_cart_count_after_docking", 2),
                 ("scenario1_pickup_max_retries", 3),
                 ("scenario2_cart_count_after_docking", 1),
@@ -102,14 +102,31 @@ class AutoNavCommander(Node):
                 ("final_cart_release_settle_sec", 1.0),
                 ("final_front_clear_distance", 0.4),
                 ("final_rear_clear_distance", 0.4),
-                ("final_rejoin_rear_goal_x", -0.2095),
-                ("final_rejoin_rear_goal_y", -0.1394),
-                ("final_rejoin_rear_goal_orientation_z", 0.011696401865232216),
-                ("final_rejoin_rear_goal_orientation_w", 0.9999315947520645),
-                ("final_rejoin_front_goal_x", -1.1921802759170532),
-                ("final_rejoin_front_goal_y", -19.888965606689453),
-                ("final_rejoin_front_goal_orientation_z", -0.01121208666598808),
-                ("final_rejoin_front_goal_orientation_w", 0.9999371425807696),
+                ("scenario1_final_rejoin_rear_goal_x", 0.8599770069122314),
+                ("scenario1_final_rejoin_rear_goal_y", -19.15309715270996),
+                ("scenario1_final_rejoin_rear_goal_orientation_z", -0.9999856263286001),
+                ("scenario1_final_rejoin_rear_goal_orientation_w", 0.005361635589744965),
+                ("scenario1_final_rejoin_front_goal_x", -1.053807020187378),
+                ("scenario1_final_rejoin_front_goal_y", -19.20579719543457),
+                ("scenario1_final_rejoin_front_goal_orientation_z", 0.9999846108287059),
+                ("scenario1_final_rejoin_front_goal_orientation_w", 0.005547801885550897),
+                ("scenario2_final_rejoin_rear_goal_x", -2.908294916152954),
+                ("scenario2_final_rejoin_rear_goal_y", -0.07905387878417969),
+                ("scenario2_final_rejoin_rear_goal_orientation_z", 0.006116885787557469),
+                ("scenario2_final_rejoin_rear_goal_orientation_w", 0.9999812916791303),
+                ("scenario2_final_rejoin_front_goal_x", -0.9434196352958679),
+                ("scenario2_final_rejoin_front_goal_y", -0.02791595458984375),
+                ("scenario2_final_rejoin_front_goal_orientation_z", 0.003011345450713699),
+                ("scenario2_final_rejoin_front_goal_orientation_w", 0.9999954658890091),
+                # Common fallback for both scenarios when scenario-specific values are unset.
+                ("final_rejoin_rear_goal_x", 0.966694176197052),
+                ("final_rejoin_rear_goal_y", -19.052921295166016),
+                ("final_rejoin_rear_goal_orientation_z", -0.9999676215785847),
+                ("final_rejoin_rear_goal_orientation_w", 0.008047098512420964),
+                ("final_rejoin_front_goal_x", -1.2060682773590088),
+                ("final_rejoin_front_goal_y", -19.187326431274414),
+                ("final_rejoin_front_goal_orientation_z", -0.9999894249273054),
+                ("final_rejoin_front_goal_orientation_w", 0.004598916563380933),
                 ("front_clear_after_detach_delay_sec", 2.0),
                 ("front_clear_distance", 0.5),
                 ("scenario2_front_wait_clear_distance", 0.5),
@@ -333,30 +350,11 @@ class AutoNavCommander(Node):
             0.0,
             self.param_float("final_rear_clear_distance", 0.4),
         )
-        self.final_rejoin_rear_goal_x = float(
-            self.get_parameter("final_rejoin_rear_goal_x").value
-        )
-        self.final_rejoin_rear_goal_y = float(
-            self.get_parameter("final_rejoin_rear_goal_y").value
-        )
-        self.final_rejoin_rear_goal_orientation_z = float(
-            self.get_parameter("final_rejoin_rear_goal_orientation_z").value
-        )
-        self.final_rejoin_rear_goal_orientation_w = float(
-            self.get_parameter("final_rejoin_rear_goal_orientation_w").value
-        )
-        self.final_rejoin_front_goal_x = float(
-            self.get_parameter("final_rejoin_front_goal_x").value
-        )
-        self.final_rejoin_front_goal_y = float(
-            self.get_parameter("final_rejoin_front_goal_y").value
-        )
-        self.final_rejoin_front_goal_orientation_z = float(
-            self.get_parameter("final_rejoin_front_goal_orientation_z").value
-        )
-        self.final_rejoin_front_goal_orientation_w = float(
-            self.get_parameter("final_rejoin_front_goal_orientation_w").value
-        )
+        final_rejoin_fallback = self.final_rejoin_goal_from_parameters("final")
+        self.final_rejoin_goal_by_scenario = {
+            1: self.final_rejoin_goal_from_parameters("scenario1", final_rejoin_fallback),
+            2: self.final_rejoin_goal_from_parameters("scenario2", final_rejoin_fallback),
+        }
         self.front_clear_after_detach_delay_sec = self.param_float(
             "front_clear_after_detach_delay_sec",
             2.0,
@@ -649,13 +647,20 @@ class AutoNavCommander(Node):
         #     (-0.4402, -21.3740, 0.0170, 0.9999),
         # ]
 
-        self.patrol_path = [
-            (4.543252944946289, -0.24770820140838623, -0.9999745678879632, 0.007131870531729373),
-            (-5.292379379272461, -0.34566593170166016, -0.9999535786807311, 0.009635376671344854),
-            (-8.811412811279297, -3.298175096511841, -0.7126716077060745, 0.7014978115216319),
-            (-9.04727554321289, -17.279687881469727, -0.7029532559013295, 0.7112360508422784),
-            (-0.4592931270599365, -21.70427703857422, -0.013582751661167484, 0.9999077501736403),
+        self.scenario1_patrol_path = [
+            (-6.109802722930908, -0.38362693786621094, 0.010608675918165238, 0.9999437264142734),
+            (6.184057712554932, -0.23793601989746094, 0.019202752229510168, 0.9998156101535983),
+            (7.457718849182129, -9.985383987426758, -0.6947470933715334, 0.719254111042687),
+            (7.718613624572754, -18.562685012817383, -0.7033821367237029, 0.7108119088324267),
+            (0.0009942054748535156, -20.868961334228516, 0.9999687854123056, 0.00790115188046708),
         ]
+        self.scenario2_patrol_path = [
+            (-7.188480377197266, -20.306917190551758, 0.9999294597132508, 0.011877524892267873),
+            (-9.020527839660645, -16.308977127075195, 0.7092328918084091, 0.704974258520892),
+            (-8.67696762084961, -1.568033218383789, 0.7124591853639031, 0.701713552092735),
+            (-1.8928279876708984, 0.9882612228393555, 0.003011246849907159, 0.9999954661859267),
+        ]
+        self.patrol_path = list(self.scenario2_patrol_path)
 
         self.active_route_type = None
         self.active_route_poses = []
@@ -1143,6 +1148,33 @@ class AutoNavCommander(Node):
             return self.scenario2_cart_count_after_docking
         return self.cart_count_after_docking
 
+    def final_rejoin_goal_from_parameters(self, scenario_prefix: str, fallback=None):
+        if scenario_prefix == "final":
+            parameter_prefix = "final_rejoin"
+        else:
+            parameter_prefix = f"{scenario_prefix}_final_rejoin"
+
+        values = (
+            float(self.get_parameter(f"{parameter_prefix}_rear_goal_x").value),
+            float(self.get_parameter(f"{parameter_prefix}_rear_goal_y").value),
+            float(self.get_parameter(f"{parameter_prefix}_rear_goal_orientation_z").value),
+            float(self.get_parameter(f"{parameter_prefix}_rear_goal_orientation_w").value),
+            float(self.get_parameter(f"{parameter_prefix}_front_goal_x").value),
+            float(self.get_parameter(f"{parameter_prefix}_front_goal_y").value),
+            float(self.get_parameter(f"{parameter_prefix}_front_goal_orientation_z").value),
+            float(self.get_parameter(f"{parameter_prefix}_front_goal_orientation_w").value),
+        )
+        if fallback is None:
+            return values
+        return tuple(
+            value if math.isfinite(value) else fallback[index]
+            for index, value in enumerate(values)
+        )
+
+    def current_final_rejoin_goal_values(self):
+        scenario_id = 1 if self.active_scenario_id == 1 else 2
+        return scenario_id, self.final_rejoin_goal_by_scenario[scenario_id]
+
     def update_dynamic_state(self, reason: str):
         self.publish_footprints()
         smoother_params, mode = self.current_velocity_params()
@@ -1164,10 +1196,10 @@ class AutoNavCommander(Node):
         if self.is_attached and self.cart_count >= 1:
             return (
                 {
-                    "max_velocity": [0.14, 0.0, 0.65],
-                    "min_velocity": [-0.08, 0.0, -0.65],
-                    "max_accel": [0.08, 0.0, 0.25],
-                    "max_decel": [-0.12, 0.0, -0.30],
+                    "max_velocity": [0.16, 0.0, 0.16],
+                    "min_velocity": [-0.06, 0.0, -0.16],
+                    "max_accel": [0.10, 0.0, 0.40],
+                    "max_decel": [-0.14, 0.0, -0.30],
                 },
                 f"ackermann cart mode ({self.cart_count} cart)",
             )
@@ -1269,10 +1301,17 @@ class AutoNavCommander(Node):
             return
 
         self.start_patrol_route(
-            self.patrol_path,
+            self.patrol_path_for_scenario(scenario_id),
             f"start_patrol_mission:{scenario_id}",
             scenario_id=scenario_id,
         )
+
+    def patrol_path_for_scenario(self, scenario_id: int):
+        if int(scenario_id) == 1:
+            return self.scenario1_patrol_path
+        if int(scenario_id) == 2:
+            return self.scenario2_patrol_path
+        return self.patrol_path
 
     def mission_path_callback(self, msg: Path):
         if not self.enable_auto_scenario:
@@ -1358,10 +1397,12 @@ class AutoNavCommander(Node):
             )
             return False
 
-        self.patrol_path = clean_points
+        self.scenario1_patrol_path = list(clean_points)
+        self.scenario2_patrol_path = list(clean_points)
+        self.patrol_path = list(clean_points)
         self.current_patrol_waypoint_index = 0
         self.get_logger().info(
-            f"{source} updated patrol path: {len(clean_points)} waypoints. "
+            f"{source} updated scenario 1/2 patrol paths: {len(clean_points)} waypoints. "
             "Publish /start_patrol_mission Int32(data=1 or 2) to start."
         )
         return True
@@ -3045,30 +3086,21 @@ class AutoNavCommander(Node):
         self.start_final_rejoin_pose_goals()
 
     def final_rejoin_goal_poses(self):
-        values = (
-            self.final_rejoin_rear_goal_x,
-            self.final_rejoin_rear_goal_y,
-            self.final_rejoin_rear_goal_orientation_z,
-            self.final_rejoin_rear_goal_orientation_w,
-            self.final_rejoin_front_goal_x,
-            self.final_rejoin_front_goal_y,
-            self.final_rejoin_front_goal_orientation_z,
-            self.final_rejoin_front_goal_orientation_w,
-        )
+        _, values = self.current_final_rejoin_goal_values()
         if not all(math.isfinite(value) for value in values):
             return None, None
 
         rear_goal = self.create_pose_stamped_zw(
-            self.final_rejoin_rear_goal_x,
-            self.final_rejoin_rear_goal_y,
-            self.final_rejoin_rear_goal_orientation_z,
-            self.final_rejoin_rear_goal_orientation_w,
+            values[0],
+            values[1],
+            values[2],
+            values[3],
         )
         front_goal = self.create_pose_stamped_zw(
-            self.final_rejoin_front_goal_x,
-            self.final_rejoin_front_goal_y,
-            self.final_rejoin_front_goal_orientation_z,
-            self.final_rejoin_front_goal_orientation_w,
+            values[4],
+            values[5],
+            values[6],
+            values[7],
         )
         return rear_goal, front_goal
 
@@ -3088,19 +3120,22 @@ class AutoNavCommander(Node):
         self.set_state(State.ROBOT_REJOIN, "final_robot_rejoin_goals")
         self.enable_navigation_control()
         self.publish_docking_target_burst(0, "final_robot_rejoin_target_reset")
+        scenario_id, values = self.current_final_rejoin_goal_values()
         self.get_logger().info(
             "sending final robot rejoin pose goals: "
+            "scenario=%d, "
             "rear=(%.2f, %.2f, qz=%.6f, qw=%.6f), "
             "front=(%.2f, %.2f, qz=%.6f, qw=%.6f)"
             % (
-                self.final_rejoin_rear_goal_x,
-                self.final_rejoin_rear_goal_y,
-                self.final_rejoin_rear_goal_orientation_z,
-                self.final_rejoin_rear_goal_orientation_w,
-                self.final_rejoin_front_goal_x,
-                self.final_rejoin_front_goal_y,
-                self.final_rejoin_front_goal_orientation_z,
-                self.final_rejoin_front_goal_orientation_w,
+                scenario_id,
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4],
+                values[5],
+                values[6],
+                values[7],
             )
         )
 

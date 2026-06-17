@@ -237,20 +237,20 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
 
       # Long ackermann mode uses a rear tracking frame with a far-front steering axis.
-      # Bias the optimizer toward smooth forward progress instead of tightly forcing
-      # the rear frame onto every local path point.
+      # Keep the commanded curvature close to the drive controller's real clamp
+      # while weighting path heading enough to enter segmented corners promptly.
       time_steps: 80
       model_dt: 0.07
       batch_size: 1800
-      vx_std: 0.10
+      vx_std: 0.11
       vy_std: 0.0
-      wz_std: 0.34
-      vx_max: 0.14
-      vx_min: -0.08
+      wz_std: 0.18
+      vx_max: 0.16
+      vx_min: -0.06
       vy_max: 0.0
       vy_min: 0.0
-      wz_max: 0.65
-      wz_min: -0.65
+      wz_max: 0.16
+      wz_min: -0.16
       iteration_count: 1
       prune_distance: 0.8
       transform_tolerance: 2.0
@@ -264,7 +264,7 @@ controller_server:
         time_step: 3
 
       AckermannConstraints:
-        min_turning_r: 0.75
+        min_turning_r: 1.0
 
       critics: ["ConstraintCritic", "ObstaclesCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
 
@@ -281,13 +281,13 @@ controller_server:
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.0
-        threshold_to_consider: 1.0
+        cost_weight: 3.5
+        threshold_to_consider: 1.2
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 6.0
-        threshold_to_consider: 2.0
+        cost_weight: 10.0
+        threshold_to_consider: 1.2
       TwirlingCritic:
         enabled: true
         cost_power: 1
@@ -313,27 +313,28 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        cost_weight: 7.5
         max_heuristic_delay: 0.1
-        trajectory_point_step: 4
-        threshold_to_consider: 1.2
-        offset_from_furthest: 10
+        trajectory_point_step: 3
+        threshold_to_consider: 1.5
+        offset_from_furthest: 8
         max_path_occupancy_ratio: 0.1
         use_path_orientations: false
       PathFollowCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 24.0
-        offset_from_furthest: 12
-        threshold_to_consider: 2.0
+        cost_weight: 20.0
+        offset_from_furthest: 10
+        threshold_to_consider: 1.8
       PathAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.5
-        offset_from_furthest: 8
-        threshold_to_consider: 1.2
-        max_angle_to_prefer: 1.0
-        max_angle_to_furthest: 1.4
+        cost_weight: 5.5
+        offset_from_furthest: 6
+        threshold_to_consider: 1.5
+        max_angle_to_prefer: 1.15
+        max_angle_to_furthest: 1.6
+        forward_preference: true
 
 
     ackermann_goal_checker:
@@ -421,9 +422,9 @@ planner_server:
       lookup_table_size: 10.0
       motion_model_for_search: "REEDS_SHEPP"
 
-      minimum_turning_radius: 0.95
-      reverse_penalty: 4.0
-      change_penalty: 1.0
+      minimum_turning_radius: 1.05
+      reverse_penalty: 6.0
+      change_penalty: 2.0
 
 local_costmap:
   local_costmap: 
