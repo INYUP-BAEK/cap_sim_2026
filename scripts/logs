@@ -1,0 +1,100 @@
+baek@baek-Vivobook-ASUSLaptop-M3500QC-M3500QC:~/colcon_ws$ scenario 
+[INFO] [1781691727.887494078] [auto_nav_commander]: dynamic update (initial): ackermann direct mode
+[INFO] [1781691727.887887930] [auto_nav_commander]: Scenario runner ready. state sync is always active, auto_scenario=true
+[INFO] [1781691892.819884718] [auto_nav_commander]: docking_state -> attached=False
+[INFO] [1781691892.831067958] [auto_nav_commander]: dynamic update (docking_state): differential detached mode
+[INFO] [1781691893.858202446] [auto_nav_commander]: docking_state -> attached=True
+[INFO] [1781691893.869348706] [auto_nav_commander]: dynamic update (docking_state): ackermann direct mode
+[INFO] [1781691914.376815901] [auto_nav_commander]: rear Nav2 lifecycle resume requested (start_patrol_mission:1)
+[INFO] [1781691914.378214967] [auto_nav_commander]: state IDLE -> APPROACH_EXIT (start_patrol_mission:1)
+[INFO] [1781691914.379709615] [auto_nav_commander]: scenario 1 cart station=(0.00, 0.94). exit=(0.01, -0.31), segment=0, t=0.50, source=continuous_path, exit_route_points=1
+[INFO] [1781691914.385883664] [auto_nav_commander]: dynamic update (route_goal): ackermann direct mode
+[INFO] [1781691914.386367089] [auto_nav_commander]: route EXIT goal 1/1
+[INFO] [1781691914.401561322] [auto_nav_commander]: rear goal accepted: ROUTE_EXIT
+[INFO] [1781691914.442754387] [auto_nav_commander]: rear Nav2 lifecycle resume complete (start_patrol_mission:1)
+[INFO] [1781691947.448864017] [auto_nav_commander]: route EXIT goal 1/1 accepted by TF fallback (periodic TF check): dist=0.35m/0.35m
+[INFO] [1781691947.449684319] [auto_nav_commander]: patrol resume reserved after docking: waypoint 2/5 (exit_reached)
+[INFO] [1781691947.450206166] [auto_nav_commander]: detach pose recorded: x=-0.33, y=-0.31, yaw=-0.09
+[INFO] [1781691947.450768590] [auto_nav_commander]: state APPROACH_EXIT -> WAIT_DETACH (detach_request)
+[INFO] [1781691947.452345142] [auto_nav_commander]: detach requested. Waiting for /docking_state=false from controller or joystick.
+[INFO] [1781691947.458905693] [auto_nav_commander]: docking_state -> attached=False
+[INFO] [1781691947.466537941] [auto_nav_commander]: dynamic update (docking_state): differential detached mode
+[INFO] [1781691947.467781874] [auto_nav_commander]: state WAIT_DETACH -> FRONT_CLEAR (detached)
+[INFO] [1781691947.468380406] [auto_nav_commander]: front clear will start after 2.0s.
+[INFO] [1781691949.468838398] [auto_nav_commander]: front initial pose published: x=0.24, y=-0.33, yaw=-0.07, source=rear_geometry
+[INFO] [1781691949.469267680] [auto_nav_commander]: sending front clear odom move: 0.50m forward.
+[INFO] [1781691949.469731979] [auto_nav_commander]: front clear command published: id=3, label=FRONT_CLEAR, distance=0.50, speed=0.12
+[INFO] [1781691955.515617646] [auto_nav_commander]: state FRONT_CLEAR -> REAR_ALIGN (front_clear_done)
+[INFO] [1781691955.516326287] [auto_nav_commander]: sending rear heading goal: yaw_delta=1.468 rad.
+[INFO] [1781691955.518979285] [auto_nav_commander]: rear goal accepted: REAR_ALIGN
+[INFO] [1781691958.186666252] [auto_nav_commander]: PointStamped received during rear align; starting dock prep goals now.
+[INFO] [1781691958.187683957] [auto_nav_commander]: canceling rear heading goal because precise cart pose is available.
+[INFO] [1781691958.188342042] [auto_nav_commander]: state REAR_ALIGN -> WAIT_PRECISE_POSE (PointStamped_received)
+[INFO] [1781691958.189630991] [auto_nav_commander]: cart center offset from aruco_3 marker=(-0.32, 0.94, -0.05) -> center=(-0.31, 1.12)
+[INFO] [1781691958.190538016] [auto_nav_commander]: state WAIT_PRECISE_POSE -> DOCK_PREP (precise_pose:PointStamped/base_link/aruco_3)
+[INFO] [1781691958.190916883] [auto_nav_commander]: dock prep goals from cart=(-0.31, 1.12, -0.05): rear=(-2.11, 1.21, -0.05, offset=1.80), front=(0.68, 1.06, -0.05, offset=1.00)
+[INFO] [1781691958.192007827] [auto_nav_commander]: front proxy goal published: id=4, label=DOCK_PREP_FRONT
+[INFO] [1781691958.193653410] [auto_nav_commander]: rear goal accepted: DOCK_PREP_REAR
+[INFO] [1781691964.703672865] [auto_nav_commander]: front dock prep TF fallback ok (periodic TF check, start): dist=0.13m/0.35m, yaw=0.53rad/0.80rad
+[INFO] [1781691964.704254365] [auto_nav_commander]: front dock prep accepted by TF fallback (periodic TF check).
+[WARN] [1781691964.718139191] [auto_nav_commander]: stale front proxy result ignored: id=4, active=0
+[INFO] [1781691975.729191696] [auto_nav_commander]: rear dock prep TF fallback ok (periodic TF check, start): dist=0.13m/0.35m, yaw=0.43rad/0.80rad
+[INFO] [1781691975.729874747] [auto_nav_commander]: rear dock prep accepted by TF fallback (periodic TF check).
+[INFO] [1781691975.730527691] [auto_nav_commander]: state DOCK_PREP -> WAIT_ATTACH (dock_prep_done)
+[INFO] [1781691975.732467868] [auto_nav_commander]: dock prep complete. Waiting for /docking_state=true (RL done topics are accepted as auxiliary signals).
+[INFO] [1781691975.733224478] [auto_nav_commander]: front docking target start command published.
+[INFO] [1781691995.979403799] [auto_nav_commander]: front rl_docking_done=true
+[INFO] [1781691995.980559614] [auto_nav_commander]: front RL docking complete. Rear docking target start command published.
+[INFO] [1781692025.132541969] [auto_nav_commander]: rear rl_docking_done=true
+[INFO] [1781692025.141622089] [auto_nav_commander]: docking_state -> attached=True
+[INFO] [1781692025.146499406] [auto_nav_commander]: dynamic update (docking_state): ackermann direct mode
+[INFO] [1781692025.147015912] [auto_nav_commander]: docking_state=true confirmed
+[INFO] [1781692025.147735222] [auto_nav_commander]: cart_count -> 2 (docking_state)
+[INFO] [1781692025.153024317] [auto_nav_commander]: dynamic update (docking_state): ackermann cart mode (2 cart)
+[INFO] [1781692025.154250986] [auto_nav_commander]: rear Nav2 lifecycle resume requested (resume_after_docking)
+[INFO] [1781692025.154765388] [auto_nav_commander]: state WAIT_ATTACH -> PATROL (resume_after_docking:docking_state)
+[INFO] [1781692025.155153341] [auto_nav_commander]: resuming patrol after docking from waypoint 2/5
+[INFO] [1781692025.156025609] [auto_nav_commander]: rear Nav2 costmap clear requested (cart mode route goal 1/4)
+[INFO] [1781692025.173375388] [auto_nav_commander]: rear Nav2 lifecycle resume complete (resume_after_docking)
+[INFO] [1781692025.864128142] [auto_nav_commander]: dynamic update (route_goal): ackermann cart mode (2 cart)
+[INFO] [1781692025.864738034] [auto_nav_commander]: route PATROL midpoint goal 1/4: tracking_offset=0.36m, turn_angle=1.27rad, midpoint=(6.18, -0.24), nav_goal=(5.82, -0.25)
+[INFO] [1781692025.870928213] [auto_nav_commander]: rear goal accepted: ROUTE_PATROL
+[INFO] [1781692070.436696156] [auto_nav_commander]: route PATROL goal 1/4 accepted by TF fallback (periodic TF check): dist=0.53m/0.55m
+[INFO] [1781692070.437780636] [auto_nav_commander]: rear Nav2 costmap clear requested (cart mode route goal 2/4)
+[INFO] [1781692071.148792625] [auto_nav_commander]: dynamic update (route_goal): ackermann cart mode (2 cart)
+[INFO] [1781692071.149291668] [auto_nav_commander]: route PATROL midpoint goal 2/4: tracking_offset=0.72m, turn_angle=0.10rad, midpoint=(7.46, -9.99), nav_goal=(7.43, -9.26)
+[INFO] [1781692071.154880050] [auto_nav_commander]: rear goal accepted: ROUTE_PATROL
+[INFO] [1781692148.751908616] [auto_nav_commander]: rear goal succeeded: ROUTE_PATROL
+[WARN] [1781692148.752544387] [auto_nav_commander]: route goal result succeeded but TF distance is 0.56m (tol 0.55m)
+[WARN] [1781692148.753010848] [auto_nav_commander]: route waypoint TF verification failed. retry route goal 1/2
+[INFO] [1781692149.754712220] [auto_nav_commander]: rear Nav2 costmap clear requested (cart mode route goal 2/4)
+[INFO] [1781692150.464370128] [auto_nav_commander]: dynamic update (route_goal): ackermann cart mode (2 cart)
+[INFO] [1781692150.464870603] [auto_nav_commander]: route PATROL midpoint goal 2/4: tracking_offset=0.72m, turn_angle=0.10rad, midpoint=(7.46, -9.99), nav_goal=(7.43, -9.26)
+[INFO] [1781692150.467753078] [auto_nav_commander]: rear goal accepted: ROUTE_PATROL
+[INFO] [1781692150.591001330] [auto_nav_commander]: rear goal succeeded: ROUTE_PATROL
+[INFO] [1781692150.597239423] [auto_nav_commander]: dynamic update (route_goal): ackermann cart mode (2 cart)
+[INFO] [1781692150.597880193] [auto_nav_commander]: route PATROL midpoint goal 3/4: tracking_offset=0.36m, turn_angle=1.31rad, midpoint=(7.72, -18.56), nav_goal=(7.71, -18.20)
+[INFO] [1781692150.601985287] [auto_nav_commander]: rear goal accepted: ROUTE_PATROL
+[INFO] [1781692211.640590843] [auto_nav_commander]: rear goal succeeded: ROUTE_PATROL
+[INFO] [1781692211.641557539] [auto_nav_commander]: rear Nav2 costmap clear requested (cart mode route goal 4/4)
+[INFO] [1781692212.350025459] [auto_nav_commander]: dynamic update (route_goal): ackermann cart mode (2 cart)
+[INFO] [1781692212.350556171] [auto_nav_commander]: route PATROL midpoint goal 4/4: tracking_offset=0.72m, turn_angle=0.31rad, midpoint=(0.00, -20.87), nav_goal=(0.73, -20.88)
+[INFO] [1781692212.354338044] [auto_nav_commander]: rear goal accepted: ROUTE_PATROL
+[INFO] [1781692261.433082437] [auto_nav_commander]: route PATROL goal 4/4 accepted by TF fallback (periodic TF check): dist=0.52m/0.55m
+[INFO] [1781692261.433478885] [auto_nav_commander]: patrol complete final dropoff decision: start=true, enabled=true, scenario=1, attached=true, cart_count=2
+[INFO] [1781692261.433924246] [auto_nav_commander]: state PATROL -> FINAL_CART_RELEASE (patrol complete)
+[INFO] [1781692261.434584062] [auto_nav_commander]: final cart dropoff started. Waiting for /docking_state=false before robot clear and rejoin.
+[INFO] [1781692262.242124746] [auto_nav_commander]: docking_state -> attached=False
+[INFO] [1781692262.251499790] [auto_nav_commander]: dynamic update (docking_state): differential detached mode
+[INFO] [1781692262.253001726] [auto_nav_commander]: cart_count -> 0 (final_cart_release:docking_state=false)
+[INFO] [1781692262.261226688] [auto_nav_commander]: dynamic update (final_cart_release:docking_state=false): differential detached mode
+[INFO] [1781692262.262530821] [auto_nav_commander]: state FINAL_CART_RELEASE -> FINAL_ROBOT_CLEAR (docking_state=false)
+[INFO] [1781692262.263314510] [auto_nav_commander]: waiting 1.00s after final cart release before robot clear.
+[INFO] [1781692263.267507952] [auto_nav_commander]: front clear command published: id=9, label=FINAL_FRONT_CLEAR, distance=0.40, speed=0.12
+[INFO] [1781692263.269486338] [auto_nav_commander]: rear goal accepted: FINAL_REAR_CLEAR
+[ERROR] [1781692271.294441170] [auto_nav_commander]: scenario aborted: timeout traveled=0.214m
+[INFO] [1781692271.295373812] [auto_nav_commander]: state FINAL_ROBOT_CLEAR -> IDLE (abort)
+[INFO] [1781692381.282286621] [auto_nav_commander]: docking_state -> attached=True
+[INFO] [1781692381.293723638] [auto_nav_commander]: dynamic update (docking_state): ackermann direct mode
+[INFO] [1781692540.053782959] [auto_nav_commander]: docking_state -> attached=False
+[INFO] [1781692540.063078426] [auto_nav_commander]: dynamic update (docking_state): differential detached mode
