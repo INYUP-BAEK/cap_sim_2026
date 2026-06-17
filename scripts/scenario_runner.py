@@ -16,10 +16,11 @@ from geometry_msgs.msg import (
     PoseArray,
     PoseWithCovarianceStamped,
     PoseStamped,
+    Twist,
 )
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap, ManageLifecycleNodes
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -102,6 +103,14 @@ class AutoNavCommander(Node):
                 ("final_cart_release_settle_sec", 1.0),
                 ("final_front_clear_distance", 0.4),
                 ("final_rear_clear_distance", 0.4),
+                ("final_front_clear_timeout_sec", 20.0),
+                ("final_front_clear_min_travel_on_timeout", 0.15),
+                ("final_rear_clear_speed", 0.10),
+                ("final_rear_clear_timeout_sec", 20.0),
+                ("final_rear_clear_min_travel_on_timeout", 0.15),
+                ("rear_clear_cmd_vel_topic", "/cmd_vel"),
+                ("rear_clear_odom_topic", "/odometry"),
+                ("rear_clear_control_period_sec", 0.05),
                 ("scenario1_final_rejoin_rear_goal_x", 0.8599770069122314),
                 ("scenario1_final_rejoin_rear_goal_y", -19.15309715270996),
                 ("scenario1_final_rejoin_rear_goal_orientation_z", -0.9999856263286001),
@@ -351,6 +360,36 @@ class AutoNavCommander(Node):
         self.final_rear_clear_distance = max(
             0.0,
             self.param_float("final_rear_clear_distance", 0.4),
+        )
+        self.final_front_clear_timeout_sec = self.param_float(
+            "final_front_clear_timeout_sec",
+            20.0,
+        )
+        self.final_front_clear_min_travel_on_timeout = max(
+            0.0,
+            self.param_float("final_front_clear_min_travel_on_timeout", 0.15),
+        )
+        self.final_rear_clear_speed = max(
+            0.01,
+            self.param_float("final_rear_clear_speed", 0.10),
+        )
+        self.final_rear_clear_timeout_sec = self.param_float(
+            "final_rear_clear_timeout_sec",
+            20.0,
+        )
+        self.final_rear_clear_min_travel_on_timeout = max(
+            0.0,
+            self.param_float("final_rear_clear_min_travel_on_timeout", 0.15),
+        )
+        self.rear_clear_cmd_vel_topic = str(
+            self.get_parameter("rear_clear_cmd_vel_topic").value
+        ).strip() or "/cmd_vel"
+        self.rear_clear_odom_topic = str(
+            self.get_parameter("rear_clear_odom_topic").value
+        ).strip() or "/odometry"
+        self.rear_clear_control_period_sec = max(
+            0.02,
+            self.param_float("rear_clear_control_period_sec", 0.05),
         )
         final_rejoin_fallback = self.final_rejoin_goal_from_parameters("final")
         self.final_rejoin_goal_by_scenario = {
@@ -628,6 +667,9 @@ class AutoNavCommander(Node):
         self.active_rear_goal_seq = 0
         self.active_rear_goal_pending = False
         self.active_rear_goal_label = None
+        self.last_rear_odom = None
+        self.active_rear_straight_clear = None
+        self.rear_straight_clear_timer = None
 
         self.active_front_goal_handle = None
         self.active_front_goal_seq = 0
@@ -792,6 +834,11 @@ class AutoNavCommander(Node):
             10,
         )
         self.rear_joy_sig_pub = self.create_publisher(Bool, "/joy_control_sig", 10)
+        self.rear_clear_cmd_pub = self.create_publisher(
+            Twist,
+            self.rear_clear_cmd_vel_topic,
+            10,
+        )
         self.front_joy_sig_pub = self.create_publisher(
             Bool,
             "/front/joy_control_sig",
@@ -842,6 +889,12 @@ class AutoNavCommander(Node):
                 UInt16,
                 self.cart_count_topic,
                 self.cart_count_callback,
+                10,
+            ),
+            self.create_subscription(
+                Odometry,
+                self.rear_clear_odom_topic,
+                self.rear_odom_callback,
                 10,
             ),
             self.create_subscription(
@@ -970,6 +1023,9 @@ class AutoNavCommander(Node):
             return
 
         self.set_cart_count(int(msg.data), "cart_count", publish=False)
+
+    def rear_odom_callback(self, msg: Odometry):
+        self.last_rear_odom = msg
 
     def rl_docking_done_callback(self, msg: Bool):
         if not bool(msg.data):
@@ -3046,25 +3102,14 @@ class AutoNavCommander(Node):
             return False
 
         if self.final_rear_clear_distance > 0.0:
-            rear_pose = self.robot_pose_in_map(
-                ("base_footprint", "base_link", "rear_base_link")
-            )
-            if rear_pose is None:
-                self.abort_scenario("rear pose unavailable for final clear")
-                return False
-            rear_x, rear_y, rear_yaw = rear_pose
-            distance = self.final_rear_clear_distance
-            rear_goal = self.create_pose_stamped(
-                rear_x - distance * math.cos(rear_yaw),
-                rear_y - distance * math.sin(rear_yaw),
-                rear_yaw,
-            )
-            if not self.send_rear_goal(
-                rear_goal,
+            if not self.start_rear_straight_clear(
                 "FINAL_REAR_CLEAR",
-                self.diff_bt_path,
+                distance=self.final_rear_clear_distance,
+                speed=self.final_rear_clear_speed,
+                timeout_sec=self.final_rear_clear_timeout_sec,
+                direction=-1.0,
             ):
-                self.abort_scenario("failed to send final rear clear goal")
+                self.abort_scenario("failed to start final rear straight clear")
                 return False
         else:
             self.final_rear_clear_done = True
@@ -3074,7 +3119,7 @@ class AutoNavCommander(Node):
                 if not self.send_front_clear_command(
                     label="FINAL_FRONT_CLEAR",
                     distance=self.final_front_clear_distance,
-                    timeout_sec=self.front_clear_timeout_sec,
+                    timeout_sec=self.final_front_clear_timeout_sec,
                 ):
                     self.abort_scenario("failed to send final front clear command")
                     return False
@@ -3351,6 +3396,153 @@ class AutoNavCommander(Node):
             self.get_logger().error(f"rear goal send exception: {ex}")
             return False
         return True
+
+    def start_rear_straight_clear(
+        self,
+        label: str,
+        distance: float,
+        speed: float,
+        timeout_sec: float,
+        direction: float,
+    ):
+        if self.last_rear_odom is None:
+            self.get_logger().error(
+                "rear straight clear rejected: odometry is unavailable on %s"
+                % self.rear_clear_odom_topic
+            )
+            return False
+
+        self.cancel_rear_goal()
+        self.publish_bool_once(self.rear_joy_sig_pub, False)
+
+        distance = max(0.0, float(distance))
+        speed = max(0.01, abs(float(speed)))
+        direction = -1.0 if float(direction) < 0.0 else 1.0
+        timeout_sec = float(timeout_sec)
+        if timeout_sec <= 0.0:
+            timeout_sec = max(3.0, distance / speed + 3.0)
+
+        start_x, start_y = self.rear_odom_xy()
+        self.active_rear_goal_pending = True
+        self.active_rear_goal_label = label
+        self.active_rear_straight_clear = {
+            "label": label,
+            "start_x": start_x,
+            "start_y": start_y,
+            "distance": distance,
+            "speed": speed,
+            "direction": direction,
+            "deadline": self.get_clock().now().nanoseconds * 1e-9 + timeout_sec,
+        }
+        self.rear_straight_clear_timer = self.create_timer(
+            self.rear_clear_control_period_sec,
+            self.update_rear_straight_clear,
+        )
+
+        self.get_logger().info(
+            "rear straight clear started: label=%s, distance=%.2fm, "
+            "speed=%.2fm/s, direction=%s"
+            % (
+                label,
+                distance,
+                speed,
+                "reverse" if direction < 0.0 else "forward",
+            )
+        )
+        return True
+
+    def update_rear_straight_clear(self):
+        clear_goal = self.active_rear_straight_clear
+        if clear_goal is None:
+            self.stop_rear_straight_clear_timer()
+            return
+
+        label = clear_goal["label"]
+        if label == "FINAL_REAR_CLEAR" and self.state != State.FINAL_ROBOT_CLEAR:
+            self.cancel_rear_straight_clear()
+            return
+
+        if self.last_rear_odom is None:
+            self.finish_rear_straight_clear(False, "rear odom lost")
+            return
+
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        current_x, current_y = self.rear_odom_xy()
+        traveled = math.hypot(
+            current_x - clear_goal["start_x"],
+            current_y - clear_goal["start_y"],
+        )
+
+        if traveled >= clear_goal["distance"]:
+            self.finish_rear_straight_clear(True, f"traveled={traveled:.3f}m")
+            return
+
+        if now_sec >= clear_goal["deadline"]:
+            self.finish_rear_straight_clear(False, f"timeout traveled={traveled:.3f}m")
+            return
+
+        cmd = Twist()
+        cmd.linear.x = clear_goal["direction"] * clear_goal["speed"]
+        self.rear_clear_cmd_pub.publish(cmd)
+
+    def finish_rear_straight_clear(self, success: bool, message: str):
+        clear_goal = self.active_rear_straight_clear
+        if clear_goal is None:
+            return
+
+        label = clear_goal["label"]
+        self.publish_rear_stop()
+        self.stop_rear_straight_clear_timer()
+        self.active_rear_straight_clear = None
+        self.active_rear_goal_pending = False
+        if self.active_rear_goal_label == label:
+            self.active_rear_goal_label = None
+
+        if label == "FINAL_REAR_CLEAR":
+            if self.state != State.FINAL_ROBOT_CLEAR:
+                self.get_logger().info(
+                    "final rear clear result ignored because state=%s: %s"
+                    % (self.state.value, message)
+                )
+                return
+            if success:
+                self.get_logger().info("final rear straight clear succeeded: %s" % message)
+                self.final_rear_clear_done = True
+                self.check_final_robot_clear_done()
+                return
+            if self.accept_final_rear_clear_failure(message):
+                return
+            self.abort_scenario(message)
+            return
+
+        if not success:
+            self.abort_scenario(message)
+
+    def rear_odom_xy(self):
+        position = self.last_rear_odom.pose.pose.position
+        return (float(position.x), float(position.y))
+
+    def publish_rear_stop(self):
+        stop = Twist()
+        for _ in range(3):
+            self.rear_clear_cmd_pub.publish(stop)
+
+    def stop_rear_straight_clear_timer(self):
+        if self.rear_straight_clear_timer is not None:
+            self.rear_straight_clear_timer.cancel()
+            self.destroy_timer(self.rear_straight_clear_timer)
+            self.rear_straight_clear_timer = None
+
+    def cancel_rear_straight_clear(self):
+        label = None
+        if self.active_rear_straight_clear is not None:
+            label = self.active_rear_straight_clear["label"]
+            self.publish_rear_stop()
+        self.stop_rear_straight_clear_timer()
+        self.active_rear_straight_clear = None
+        if label is not None and self.active_rear_goal_label == label:
+            self.active_rear_goal_pending = False
+            self.active_rear_goal_label = None
 
     def send_front_goal(self, pose: PoseStamped, label: str):
         if self.front_nav_transport == "topic_proxy":
@@ -4230,6 +4422,8 @@ class AutoNavCommander(Node):
                     % (self.state.value, reason)
                 )
                 return
+            if self.accept_final_front_clear_failure(reason):
+                return
             self.abort_scenario(reason)
         elif label == "REJOIN_FRONT":
             if self.state != State.ROBOT_REJOIN:
@@ -4241,6 +4435,67 @@ class AutoNavCommander(Node):
             self.abort_scenario(reason)
         else:
             self.get_logger().warn(reason)
+
+    def accept_final_front_clear_failure(self, reason: str):
+        traveled = self.clear_forward_traveled_from_reason(reason)
+        if traveled is None:
+            return False
+
+        if traveled < self.final_front_clear_min_travel_on_timeout:
+            self.get_logger().warn(
+                "final front clear failed before enough separation: "
+                "traveled=%.3fm, required=%.3fm"
+                % (traveled, self.final_front_clear_min_travel_on_timeout)
+            )
+            return False
+
+        self.get_logger().warn(
+            "final front clear timed out after %.3fm, accepting partial clear "
+            "and continuing to robot rejoin."
+            % traveled
+        )
+        self.final_front_clear_done = True
+        self.check_final_robot_clear_done()
+        return True
+
+    def accept_final_rear_clear_failure(self, reason: str):
+        traveled = self.clear_forward_traveled_from_reason(reason)
+        if traveled is None:
+            return False
+
+        if traveled < self.final_rear_clear_min_travel_on_timeout:
+            self.get_logger().warn(
+                "final rear clear failed before enough separation: "
+                "traveled=%.3fm, required=%.3fm"
+                % (traveled, self.final_rear_clear_min_travel_on_timeout)
+            )
+            return False
+
+        self.get_logger().warn(
+            "final rear clear timed out after %.3fm, accepting partial clear "
+            "and continuing to robot rejoin."
+            % traveled
+        )
+        self.final_rear_clear_done = True
+        self.check_final_robot_clear_done()
+        return True
+
+    def clear_forward_traveled_from_reason(self, reason: str):
+        marker = "traveled="
+        text = str(reason or "")
+        index = text.find(marker)
+        if index < 0:
+            return None
+
+        value_start = index + len(marker)
+        value_end = value_start
+        while value_end < len(text) and text[value_end] not in ("m", " ", ",", ")"):
+            value_end += 1
+
+        try:
+            return float(text[value_start:value_end])
+        except ValueError:
+            return None
 
     def schedule_front_goal_timeout(self):
         timeout_sec = self.front_goal_timeout_sec
@@ -4623,6 +4878,7 @@ class AutoNavCommander(Node):
     # Goal cancel and route helpers
     # ------------------------------------------------------------------
     def cancel_rear_goal(self):
+        self.cancel_rear_straight_clear()
         self.active_rear_goal_seq += 1
         self.active_rear_goal_pending = False
         self.active_rear_goal_label = None
