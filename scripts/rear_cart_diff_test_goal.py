@@ -95,6 +95,7 @@ class RearCartDiffTestGoal(Node):
         self.tf_wait_start_time = None
         self.last_tf_wait_log_time = None
         self.goal_sent = False
+        self.velocity_smoother_client = None
 
         self.global_footprint_pub = self.create_publisher(
             Polygon,
@@ -155,8 +156,7 @@ class RearCartDiffTestGoal(Node):
                 self.log_tf_wait(now, elapsed)
                 return
 
-            self.goal_timer.cancel()
-            self.destroy_timer(self.goal_timer)
+            self.stop_goal_timer()
             self.get_logger().error(
                 "failed to get current rear pose from TF frames after %.1fs: %s"
                 % (elapsed, ", ".join(self.base_frame_candidates))
@@ -166,8 +166,7 @@ class RearCartDiffTestGoal(Node):
             return
 
         self.goal_sent = True
-        self.goal_timer.cancel()
-        self.destroy_timer(self.goal_timer)
+        self.stop_goal_timer()
 
         x, y, yaw, frame = pose
         dx = -self.back_distance_m
@@ -289,10 +288,13 @@ class RearCartDiffTestGoal(Node):
             "max_accel": [0.20, 0.0, 1.0],
             "max_decel": [-0.20, 0.0, -1.0],
         }
-        client = self.create_client(
-            SetParameters,
-            f"{self.velocity_smoother_node}/set_parameters",
-        )
+        client = self.velocity_smoother_client
+        if client is None:
+            client = self.create_client(
+                SetParameters,
+                f"{self.velocity_smoother_node}/set_parameters",
+            )
+            self.velocity_smoother_client = client
         if not client.wait_for_service(timeout_sec=0.5):
             self.get_logger().warn(
                 "%s set_parameters service not ready." % self.velocity_smoother_node
@@ -319,6 +321,26 @@ class RearCartDiffTestGoal(Node):
             self.get_logger().warn("velocity smoother rejected params: %s" % rejected)
         else:
             self.get_logger().info("velocity smoother set to rear-cart diff limits.")
+
+    def stop_goal_timer(self):
+        if getattr(self, "goal_timer", None) is not None:
+            self.goal_timer.cancel()
+            self.destroy_timer(self.goal_timer)
+            self.goal_timer = None
+
+    def stop_footprint_timer(self):
+        if getattr(self, "footprint_timer", None) is not None:
+            self.footprint_timer.cancel()
+            self.destroy_timer(self.footprint_timer)
+            self.footprint_timer = None
+
+    def destroy_node(self):
+        self.stop_goal_timer()
+        self.stop_footprint_timer()
+        if self.velocity_smoother_client is not None:
+            self.destroy_client(self.velocity_smoother_client)
+            self.velocity_smoother_client = None
+        return super().destroy_node()
 
     @staticmethod
     def create_polygon(front_x: float, rear_x: float, width: float):

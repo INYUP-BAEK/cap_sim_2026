@@ -232,11 +232,11 @@ class AutoNavCommander(Node):
         self.allow_manual_goal_interrupt = bool(
             self.get_parameter("allow_manual_goal_interrupt").value
         )
-        self.scenario1_cart_station_x = self.param_float(
+        self.scenario1_cart_station_x = self.param_float_signed(
             "scenario1_cart_station_x",
             0.0,
         )
-        self.scenario1_cart_station_y = self.param_float(
+        self.scenario1_cart_station_y = self.param_float_signed(
             "scenario1_cart_station_y",
             0.0,
         )
@@ -701,7 +701,7 @@ class AutoNavCommander(Node):
 
         self.scenario1_patrol_path = [
             (-6.109802722930908, -0.38362693786621094, 0.010608675918165238, 0.9999437264142734),
-            (6.184057712554932, -0.23793601989746094, 0.019202752229510168, 0.9998156101535983),
+            (5.784057712554932, -0.23793601989746094, 0.019202752229510168, 0.9998156101535983),
             (7.457718849182129, -9.985383987426758, -0.6947470933715334, 0.719254111042687),
             (7.718613624572754, -18.562685012817383, -0.7033821367237029, 0.7108119088324267),
             (0.0009942054748535156, -20.868961334228516, 0.9999687854123056, 0.00790115188046708),
@@ -765,6 +765,7 @@ class AutoNavCommander(Node):
         self.rear_rl_docking_started = False
         self.docking_state_confirmed = bool(self.is_attached)
         self.scenario_timers = {}
+        self.parameter_clients = {}
 
         self.global_footprint_pub = self.create_publisher(
             Polygon,
@@ -6051,8 +6052,15 @@ class AutoNavCommander(Node):
     # ------------------------------------------------------------------
     # Generic ROS helpers
     # ------------------------------------------------------------------
+    def parameter_client_for_node(self, node_name: str):
+        client = self.parameter_clients.get(node_name)
+        if client is None:
+            client = self.create_client(SetParameters, f"{node_name}/set_parameters")
+            self.parameter_clients[node_name] = client
+        return client
+
     def send_parameters_to_node(self, node_name: str, param_dict: dict):
-        client = self.create_client(SetParameters, f"{node_name}/set_parameters")
+        client = self.parameter_client_for_node(node_name)
         if not client.wait_for_service(timeout_sec=0.3):
             self.get_logger().warn(f"{node_name} set_parameters service not ready.")
             return
@@ -6081,6 +6089,29 @@ class AutoNavCommander(Node):
         failed = [result.reason for result in response.results if not result.successful]
         if failed:
             self.get_logger().warn(f"{node_name} rejected parameters: {failed}")
+
+    def destroy_parameter_clients(self):
+        for node_name, client in list(self.parameter_clients.items()):
+            try:
+                self.destroy_client(client)
+            except Exception as ex:
+                self.get_logger().warn(
+                    f"failed to destroy parameter client for {node_name}: {ex}"
+                )
+        self.parameter_clients.clear()
+
+    def stop_footprint_timer(self):
+        if getattr(self, "footprint_timer", None) is not None:
+            self.footprint_timer.cancel()
+            self.destroy_timer(self.footprint_timer)
+            self.footprint_timer = None
+
+    def destroy_node(self):
+        self.cancel_all_timers()
+        self.stop_rear_straight_clear_timer()
+        self.stop_footprint_timer()
+        self.destroy_parameter_clients()
+        return super().destroy_node()
 
     def current_behavior_tree(self):
         if self.rear_cart_attached:
@@ -6144,6 +6175,9 @@ class AutoNavCommander(Node):
 
     def param_float(self, name, default):
         return max(0.0, float(self.get_parameter(name).value if self.has_parameter(name) else default))
+
+    def param_float_signed(self, name, default):
+        return float(self.get_parameter(name).value if self.has_parameter(name) else default)
 
     def param_int(self, name, default):
         return max(0, int(self.get_parameter(name).value if self.has_parameter(name) else default))

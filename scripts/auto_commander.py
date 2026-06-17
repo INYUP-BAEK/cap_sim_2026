@@ -35,6 +35,7 @@ class AutoNavCommander(Node):
         self.is_attached = True
         self.cart_count = 0
         self.last_cart_goal_time = None
+        self.parameter_clients = {}
 
         # 3. 풋프린트 퍼블리셔 설정
         self.global_footprint_pub = self.create_publisher(Polygon, "/global_costmap/footprint", 10)
@@ -238,8 +239,15 @@ class AutoNavCommander(Node):
     # ----------------------------------------------------------
     # 🛠️ 내부 헬퍼 메서드 (직접 파라미터 전송 통신용)
     # ----------------------------------------------------------
+    def _parameter_client_for_node(self, node_name):
+        client = self.parameter_clients.get(node_name)
+        if client is None:
+            client = self.create_client(SetParameters, f"{node_name}/set_parameters")
+            self.parameter_clients[node_name] = client
+        return client
+
     def _send_parameters_to_node(self, node_name, param_dict):
-        client = self.create_client(SetParameters, f"{node_name}/set_parameters")
+        client = self._parameter_client_for_node(node_name)
 
         if not client.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn(f"⚠️ {node_name} 서비스 연결 지연 중.")
@@ -275,6 +283,12 @@ class AutoNavCommander(Node):
             Point32(x=float(rear_x), y=float(-width), z=0.0),
         ]
         return poly
+
+    def destroy_node(self):
+        for client in list(self.parameter_clients.values()):
+            self.destroy_client(client)
+        self.parameter_clients.clear()
+        return super().destroy_node()
 
 
 def main(args=None):

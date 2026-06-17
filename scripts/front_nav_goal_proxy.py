@@ -242,7 +242,12 @@ class FrontNavGoalProxy(Node):
     def stop_clear_timer(self):
         if self.clear_timer is not None:
             self.clear_timer.cancel()
+            self.destroy_timer(self.clear_timer)
             self.clear_timer = None
+
+    def destroy_node(self):
+        self.stop_clear_timer()
+        return super().destroy_node()
 
     def goal_response(self, future, goal_seq: int, goal_id: int):
         if goal_seq != self.active_goal_seq or goal_id != self.active_goal_id:
