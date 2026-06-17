@@ -156,8 +156,10 @@ class AutoNavCommander(Node):
                 ("rear_cart_grip_settle_delay_sec", 3.0),
                 ("front_goal_timeout_sec", 30.0),
                 ("dock_prep_front_goal_timeout_sec", 90.0),
+                ("final_rejoin_front_goal_timeout_sec", 180.0),
                 ("dock_goal_offset", 1.5),
                 ("rear_dock_goal_offset", 1.5),
+                ("scenario1_rear_dock_goal_offset", 1.8),
                 ("front_dock_goal_offset", 1.0),
                 ("rear_final_yaw_tolerance", 0.08),
                 ("dock_prep_tf_xy_tolerance", 0.20),
@@ -447,10 +449,18 @@ class AutoNavCommander(Node):
             "dock_prep_front_goal_timeout_sec",
             90.0,
         )
+        self.final_rejoin_front_goal_timeout_sec = self.param_float(
+            "final_rejoin_front_goal_timeout_sec",
+            180.0,
+        )
         self.dock_goal_offset = self.param_float("dock_goal_offset", 2.0)
         self.rear_dock_goal_offset = max(
             0.0,
             self.param_float("rear_dock_goal_offset", 1.5),
+        )
+        self.scenario1_rear_dock_goal_offset = max(
+            0.0,
+            self.param_float("scenario1_rear_dock_goal_offset", 1.8),
         )
         self.front_dock_goal_offset = max(
             0.0,
@@ -2081,7 +2091,7 @@ class AutoNavCommander(Node):
             )
             return
 
-        rear_offset = self.rear_dock_goal_offset
+        rear_offset = self.scenario1_rear_dock_goal_offset
         front_offset = self.front_dock_goal_offset
         rear_x = cart_x - rear_offset * math.cos(cart_yaw)
         rear_y = cart_y - rear_offset * math.sin(cart_yaw)
@@ -2904,6 +2914,19 @@ class AutoNavCommander(Node):
             and self.cart_count >= 1
         )
 
+    def log_final_cart_dropoff_decision(self, should_start: bool):
+        self.get_logger().info(
+            "patrol complete final dropoff decision: start=%s, enabled=%s, "
+            "scenario=%d, attached=%s, cart_count=%d"
+            % (
+                "true" if should_start else "false",
+                "true" if self.final_cart_dropoff_enabled else "false",
+                self.active_scenario_id,
+                "true" if self.is_attached else "false",
+                self.cart_count,
+            )
+        )
+
     def start_final_cart_dropoff(self, reason: str):
         self.cancel_rear_goal()
         self.cancel_front_goal()
@@ -3282,10 +3305,15 @@ class AutoNavCommander(Node):
 
     def finish_route(self):
         route_type = self.active_route_type
+        should_start_final_dropoff = (
+            route_type == "PATROL" and self.should_start_final_cart_dropoff()
+        )
+        if route_type == "PATROL":
+            self.log_final_cart_dropoff_decision(should_start_final_dropoff)
         self.clear_route()
 
         if route_type == "PATROL":
-            if self.should_start_final_cart_dropoff():
+            if should_start_final_dropoff:
                 self.start_final_cart_dropoff("patrol complete")
                 return
             self.complete_scenario("patrol complete")
@@ -4218,6 +4246,11 @@ class AutoNavCommander(Node):
         timeout_sec = self.front_goal_timeout_sec
         if self.active_front_goal_label == "DOCK_PREP_FRONT":
             timeout_sec = self.dock_prep_front_goal_timeout_sec
+        elif (
+            self.active_front_goal_label == "REJOIN_FRONT"
+            and self.rejoin_mode == "final_cart_dropoff"
+        ):
+            timeout_sec = self.final_rejoin_front_goal_timeout_sec
 
         if timeout_sec <= 0.0:
             return
